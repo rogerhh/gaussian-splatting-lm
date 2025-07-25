@@ -4,17 +4,29 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - cudatoolkit=11.6
-  - plyfile
-  - python=3.7.13
-  - pip=22.3.1
-  - pytorch=1.12.1
-  - torchaudio=0.12.1
-  - torchvision=0.13.1
+  - python=3.11.11
+  - nvidia/label/cuda-12.4.0::cuda-toolkit
+  - plyfile=1.1
+  - pip=24.3.1
+  - pytorch=2.5.0
+  - torchaudio=2.5.0
+  - torchvision=0.20.0
   - tqdm
   - pip:
-    - submodules/diff-gaussian-rasterization
-    - submodules/simple-knn
-    - submodules/fused-ssim
-    - opencv-python
-    - joblib
+    - numpy==1.26
+    - opencv-python==4.8.1.78
+    - munch
+    - trimesh
+    - matplotlib==3.10.0
+    - evo==1.30.6
+    - open3d==0.17.0
+    - torchmetrics
+    - imgviz
+    - PyOpenGL
+    - glfw
+    - PyGLM
+    - wandb
+    - lpips
+    - rich
+    - ruff
+    - PyQt5
