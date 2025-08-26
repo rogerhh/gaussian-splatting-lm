@@ -14,6 +14,7 @@ import sys
 from datetime import datetime
 import numpy as np
 import random
+import code
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
@@ -108,6 +109,16 @@ def build_scaling_rotation(s, r):
 
     L = R @ L
     return L
+
+def safe_interact(local=None, banner=None):
+    old_stdout = sys.stdout
+    try:
+        # restore real stdout so readline works
+        sys.stdout = sys.__stdout__
+        code.interact(local=local, banner=banner)
+    finally:
+        # restore your wrapped stdout after interact
+        sys.stdout = old_stdout
 
 def safe_state(silent):
     old_f = sys.stdout

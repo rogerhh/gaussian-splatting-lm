@@ -10,6 +10,7 @@
 #
 
 import torch
+import torch.autograd.forward_ad as fwAD
 import numpy as np
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
 from torch import nn
@@ -21,6 +22,8 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+from solver.gaussian_model_state import GaussianModelState
+from contextlib import contextmanager
 
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
@@ -64,6 +67,93 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self.setup_functions()
+
+    @contextmanager
+    def make_dual(self, v):
+        assert isinstance(v, GaussianModelState), "v must be an instance of GaussianModelState"
+        # Make copy of original leaf tensors
+        xyz_orig = self._xyz
+        features_dc_orig = self._features_dc
+        features_rest_orig = self._features_rest
+        scaling_orig = self._scaling
+        rotation_orig = self._rotation
+        opacity_orig = self._opacity
+        exposure_orig = self._exposure
+
+        self._xyz = fwAD.make_dual(self._xyz, v.xyz_grad)
+        self._features_dc = fwAD.make_dual(self._features_dc, v.features_dc_grad)
+        self._features_rest = fwAD.make_dual(self._features_rest, v.features_rest_grad)
+        self._scaling = fwAD.make_dual(self._scaling, v.scaling_grad)
+        self._rotation = fwAD.make_dual(self._rotation, v.rotation_grad)
+        self._opacity = fwAD.make_dual(self._opacity, v.opacity_grad)
+        self._exposure = fwAD.make_dual(self._exposure, v.exposure_grad)
+
+        try:
+            yield
+        finally:
+            # Restore original leaf tensors
+            self._xyz = xyz_orig
+            self._features_dc = features_dc_orig
+            self._features_rest = features_rest_orig
+            self._scaling = scaling_orig
+            self._rotation = rotation_orig
+            self._opacity = opacity_orig
+            self._exposure = exposure_orig
+
+    # def make_dual(self, v):
+    #     assert isinstance(v, GaussianModelState), "v must be an instance of GaussianModelState"
+    #     self._xyz = fwAD.make_dual(self._xyz, v.xyz_grad)
+    #     self._features_dc = fwAD.make_dual(self._features_dc, v.features_dc_grad)
+    #     self._features_rest = fwAD.make_dual(self._features_rest, v.features_rest_grad)
+    #     self._scaling = fwAD.make_dual(self._scaling, v.scaling_grad)
+    #     self._rotation = fwAD.make_dual(self._rotation, v.rotation_grad)
+    #     self._opacity = fwAD.make_dual(self._opacity, v.opacity_grad)
+    #     self._exposure = fwAD.make_dual(self._exposure, v.exposure_grad)
+
+    # def unmake_dual(self):
+    #     self._xyz = fwAD.unpack_dual(self._xyz).primal
+    #     self._features_dc = fwAD.unpack_dual(self._features_dc).primal
+    #     self._features_rest = fwAD.unpack_dual(self._features_rest).primal
+    #     self._scaling = fwAD.unpack_dual(self._scaling).primal
+    #     self._rotation = fwAD.unpack_dual(self._rotation).primal
+    #     self._opacity = fwAD.unpack_dual(self._opacity).primal
+    #     self._exposure = fwAD.unpack_dual(self._exposure).primal
+
+    def zero_grad(self):
+        self._xyz.grad = None
+        self._features_dc.grad = None
+        self._features_rest.grad = None
+        self._scaling.grad = None
+        self._rotation.grad = None
+        self._opacity.grad = None
+        self._exposure.grad = None
+
+    def update_step(self, s):
+        assert isinstance(s, GaussianModelState), "s must be an instance of GaussianModelState"
+        self._xyz.data += s.xyz_grad
+        self._features_dc.data += s.features_dc_grad
+        self._features_rest.data += s.features_rest_grad
+        self._scaling.data += s.scaling_grad
+        self._rotation.data += s.rotation_grad
+        self._opacity.data += s.opacity_grad
+        self._exposure.data += s.exposure_grad
+
+    def create_zero_tangent(self):
+        print("Creating a zero tangent Gaussian model")
+        self._xyz_grad = torch.zeros_like(self._xyz)
+        self._xyz = fwAD.make_dual(self._xyz, self._xyz_grad)
+        self._features_dc_grad = torch.zeros_like(self._features_dc)
+        self._features_dc = fwAD.make_dual(self._features_dc, self._features_dc_grad)
+        self._features_rest_grad = torch.zeros_like(self._features_rest)
+        self._features_rest = fwAD.make_dual(self._features_rest, self._features_rest_grad)
+        self._scaling_grad = torch.zeros_like(self._scaling)
+        self._scaling = fwAD.make_dual(self._scaling, self._scaling_grad)
+        self._rotation_grad = torch.zeros_like(self._rotation)
+        self._rotation = fwAD.make_dual(self._rotation, self._rotation_grad)
+        self._opacity_grad = torch.zeros_like(self._opacity)
+        self._opacity = fwAD.make_dual(self._opacity, self._opacity_grad)
+        self._exposure_grad = torch.zeros_like(self._exposure)
+        self._exposure = fwAD.make_dual(self._exposure, self._exposure_grad)
 
     def capture(self):
         return (
