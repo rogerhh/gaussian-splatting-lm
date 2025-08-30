@@ -1,13 +1,58 @@
 import torch
 import torch.autograd.forward_ad as fwAD
 
+class GaussianModelDampMatrix:
+    """
+    Per parameter damping matrix for Gaussians
+    """
+    def __init__(self, xyz_damp, features_dc_damp, features_rest_damp,
+                 scaling_damp, rotation_damp, opacity_damp, exposure_damp):
+        self.xyz_damp = xyz_damp
+        self.features_dc_damp = features_dc_damp
+        self.features_rest_damp = features_rest_damp
+        self.scaling_damp = scaling_damp
+        self.rotation_damp = rotation_damp
+        self.opacity_damp = opacity_damp
+        self.exposure_damp = exposure_damp
+
+    def __neg__(self):
+        return GaussianModelDampMatrix(-self.xyz_damp,
+                                       -self.features_dc_damp,
+                                       -self.features_rest_damp,
+                                       -self.scaling_damp,
+                                       -self.rotation_damp,
+                                       -self.opacity_damp,
+                                       -self.exposure_damp)
+
+class GaussianModelParamGroupMask:
+    """
+    Per parameter mask
+    """
+    def __init__(self, mask_xyz=False, mask_features_dc=False, mask_features_rest=False,
+                 mask_scaling=False, mask_rotation=False, mask_opacity=False, mask_exposure=False):
+        self.mask_xyz = mask_xyz
+        self.mask_features_dc = mask_features_dc
+        self.mask_features_rest = mask_features_rest
+        self.mask_scaling = mask_scaling
+        self.mask_rotation = mask_rotation
+        self.mask_opacity = mask_opacity
+        self.mask_exposure = mask_exposure
+
+class GaussianModelSplatMask:
+    """
+    Per splat mask
+    """
+    def __init__(self, mask_out_filter):
+        self.mask_out_filter = mask_out_filter
+
 class GaussianModelState:
     """
     Represents updates to Gaussian parameters as a generalized vector
     """
 
     def __init__(self, xyz_grad, features_dc_grad, features_rest_grad,
-                 scaling_grad, rotation_grad, opacity_grad, exposure_grad):
+                 scaling_grad, rotation_grad, opacity_grad, exposure_grad,
+                 param_mask=None, splat_mask=None):
         self.xyz_grad = xyz_grad
         self.features_dc_grad = features_dc_grad
         self.features_rest_grad = features_rest_grad
@@ -16,32 +61,61 @@ class GaussianModelState:
         self.opacity_grad = opacity_grad
         self.exposure_grad = exposure_grad
 
+        if param_mask is not None:
+            assert isinstance(param_mask, GaussianModelParamGroupMask), "param_mask must be an instance of GaussianModelParamGroupMask"
+            if param_mask.mask_xyz:
+                self.xyz_grad.zero_()
+            if param_mask.mask_features_dc:
+                self.features_dc_grad.zero_()
+            if param_mask.mask_features_rest:
+                self.features_rest_grad.zero_()
+            if param_mask.mask_scaling:
+                self.scaling_grad.zero_()
+            if param_mask.mask_rotation:
+                self.rotation_grad.zero_()
+            if param_mask.mask_opacity:
+                self.opacity_grad.zero_()
+            if param_mask.mask_exposure:
+                self.exposure_grad.zero_()
+        if splat_mask is not None:
+            self.xyz_grad[splat_mask.mask_out_filter] = 0
+            self.features_dc_grad[splat_mask.mask_out_filter] = 0
+            self.features_rest_grad[splat_mask.mask_out_filter] = 0
+            self.scaling_grad[splat_mask.mask_out_filter] = 0
+            self.rotation_grad[splat_mask.mask_out_filter] = 0
+            self.opacity_grad[splat_mask.mask_out_filter] = 0
+            self.exposure_grad[splat_mask.mask_out_filter] = 0
+
     @classmethod
-    def from_gaussians(cls, gaussians):
+    def from_gaussians(cls, gaussians, param_mask=None, splat_mask=None):
         return cls(torch.zeros_like(gaussians._xyz),
                    torch.zeros_like(gaussians._features_dc),
                    torch.zeros_like(gaussians._features_rest),
                    torch.zeros_like(gaussians._scaling),
                    torch.zeros_like(gaussians._rotation),
                    torch.zeros_like(gaussians._opacity),
-                   torch.zeros_like(gaussians._exposure))
+                   torch.zeros_like(gaussians._exposure),
+                   param_mask=param_mask,
+                   splat_mask=splat_mask)
 
     @classmethod
-    def from_gaussians_grad(cls, gaussians):
-        gaussians._xyz.grad = gaussians._xyz.grad if gaussians._xyz.grad is not None else torch.zeros_like(gaussians._xyz)
-        gaussians._features_dc.grad = gaussians._features_dc.grad if gaussians._features_dc.grad is not None else torch.zeros_like(gaussians._features_dc)
-        gaussians._features_rest.grad = gaussians._features_rest.grad if gaussians._features_rest.grad is not None else torch.zeros_like(gaussians._features_rest)
-        gaussians._scaling.grad = gaussians._scaling.grad if gaussians._scaling.grad is not None else torch.zeros_like(gaussians._scaling)
-        gaussians._rotation.grad = gaussians._rotation.grad if gaussians._rotation.grad is not None else torch.zeros_like(gaussians._rotation)
-        gaussians._opacity.grad = gaussians._opacity.grad if gaussians._opacity.grad is not None else torch.zeros_like(gaussians._opacity)
-        gaussians._exposure.grad = gaussians._exposure.grad if gaussians._exposure.grad is not None else torch.zeros_like(gaussians._exposure)
-        return cls(gaussians._xyz.grad,
-                   gaussians._features_dc.grad,
-                   gaussians._features_rest.grad,
-                   gaussians._scaling.grad,
-                   gaussians._rotation.grad,
-                   gaussians._opacity.grad,
-                   gaussians._exposure.grad)
+    def from_gaussians_grad(cls, gaussians, param_mask=None, splat_mask=None):
+        xyz_grad = gaussians._xyz.grad if gaussians._xyz.grad is not None else torch.zeros_like(gaussians._xyz)
+        features_dc_grad = gaussians._features_dc.grad if gaussians._features_dc.grad is not None else torch.zeros_like(gaussians._features_dc)
+        features_rest_grad = gaussians._features_rest.grad if gaussians._features_rest.grad is not None else torch.zeros_like(gaussians._features_rest)
+        scaling_grad = gaussians._scaling.grad if gaussians._scaling.grad is not None else torch.zeros_like(gaussians._scaling)
+        rotation_grad = gaussians._rotation.grad if gaussians._rotation.grad is not None else torch.zeros_like(gaussians._rotation)
+        opacity_grad = gaussians._opacity.grad if gaussians._opacity.grad is not None else torch.zeros_like(gaussians._opacity)
+        exposure_grad = gaussians._exposure.grad if gaussians._exposure.grad is not None else torch.zeros_like(gaussians._exposure)
+        return cls(xyz_grad,
+                   features_dc_grad,
+                   features_rest_grad,
+                   scaling_grad,
+                   rotation_grad,
+                   opacity_grad,
+                   exposure_grad,
+                   param_mask=param_mask,
+                   splat_mask=splat_mask)
 
     @property
     def length(self):
@@ -159,19 +233,42 @@ class GaussianModelState:
                 self.opacity_grad * other,
                 self.exposure_grad * other
             )
+        if isinstance(other, GaussianModelDampMatrix):
+            return GaussianModelState(
+                self.xyz_grad * other.xyz_damp,
+                self.features_dc_grad * other.features_dc_damp,
+                self.features_rest_grad * other.features_rest_damp,
+                self.scaling_grad * other.scaling_damp,
+                self.rotation_grad * other.rotation_damp,
+                self.opacity_grad * other.opacity_damp,
+                self.exposure_grad * other.exposure_damp
+            )
         else:
             raise TypeError(f"Can only multiply by scalar values, not {type(other)}")
 
     def __rmul__(self, other):
         return self.__mul__(other)
 
-    def dot(self, other):
-        s = torch.sum(self.xyz_grad * other.xyz_grad) + \
-            torch.sum(self.features_dc_grad * other.features_dc_grad) + \
-            torch.sum(self.features_rest_grad * other.features_rest_grad) + \
-            torch.sum(self.scaling_grad * other.scaling_grad) + \
-            torch.sum(self.rotation_grad * other.rotation_grad) + \
-            torch.sum(self.opacity_grad * other.opacity_grad) + \
-            torch.sum(self.exposure_grad * other.exposure_grad)
+    def dot(self, other, damp):
+        if isinstance(damp, (int, float)):
+            s = torch.sum(self.xyz_grad * other.xyz_grad) + \
+                torch.sum(self.features_dc_grad * other.features_dc_grad) + \
+                torch.sum(self.features_rest_grad * other.features_rest_grad) + \
+                torch.sum(self.scaling_grad * other.scaling_grad) + \
+                torch.sum(self.rotation_grad * other.rotation_grad) + \
+                torch.sum(self.opacity_grad * other.opacity_grad) + \
+                torch.sum(self.exposure_grad * other.exposure_grad)
+            s *= damp
+        elif isinstance(damp, GaussianModelDampMatrix):
+            s = damp.xyz_damp * torch.sum(self.xyz_grad * other.xyz_grad) + \
+                damp.features_dc_damp * torch.sum(self.features_dc_grad * other.features_dc_grad) + \
+                damp.features_rest_damp * torch.sum(self.features_rest_grad * other.features_rest_grad) + \
+                damp.scaling_damp * torch.sum(self.scaling_grad * other.scaling_grad) + \
+                damp.rotation_damp * torch.sum(self.rotation_grad * other.rotation_grad) + \
+                damp.opacity_damp * torch.sum(self.opacity_grad * other.opacity_grad) + \
+                damp.exposure_damp * torch.sum(self.exposure_grad * other.exposure_grad)
+        else:
+            raise TypeError(f"damp must be a scalar or GaussianModelDampMatrix, not {type(damp)}")
+
         return s.item()
      

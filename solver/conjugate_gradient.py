@@ -1,3 +1,5 @@
+import math
+
 def conjugate_gradient(
     matvec,        # function(x) -> A @ x
     vec_add,       # function(x, y) -> x + y
@@ -61,15 +63,18 @@ def cgls_damped(
     callback=None,
     verbose=False
 ):
-    damp_sq = damp * damp
     x = x0
     iter_total = 0
+
+    last_res = math.inf
+
+    break_flag = False
 
     while iter_total < max_iter:
         print(f"Restarting CG iteration {iter_total + 1}...") if verbose else None
 
         r0 = saxpy(-1.0, matvec(x), b)         # r0 = b - A x0
-        s0 = saxpy(-damp_sq, x, matvec_T(r0))
+        s0 = saxpy(-damp, x, matvec_T(r0))  # s0 = A^T r0 - λ^2 x0
         p0 = s0
 
         r = r0
@@ -80,30 +85,40 @@ def cgls_damped(
         for k in range(restart_iter):
             iter_total += 1
             q = matvec(p)                  # q = A p
-            delta = dot(q, q) + damp_sq * dot(p, p)  # delta = <q, q> + λ^2 * <p, p>
-            if delta == 0:
-                print("Early termination: delta is zero.")
+            delta = dot(q, q) + dot(p, p, damp)  # delta = <q, q> + λ^2 * <p, p>
+            if delta < 1e-20:
+                print("Early termination: delta is too small.")
+                break_flag = True
                 break
             # print(f"delta: {delta:.4e}, gamma: {gamma:.4e}")
-            s = saxpy(-damp_sq, x, matvec_T(r))  # s = A^T r - λ^2 x
             alpha = gamma / delta
             x = saxpy(alpha, p, x)         # x = x + alpha * p
             r = saxpy(-alpha, q, r)        # r = r - alpha * q
-            s = saxpy(-damp_sq, x, matvec_T(r))  # s = A^T r - λ^2 x
+            s = saxpy(-damp, x, matvec_T(r))  # s = A^T r - λ^2 x
             gamma_prev = gamma
             gamma = dot(s, s)  # Update norm of s
             beta = gamma / gamma_prev
             p = saxpy(beta, p, s)          # p = s + beta * p
 
-            if verbose:
-                cur_r = saxpy(-1.0, matvec(x), b)         # r0 = b - A x0
-                res = dot(cur_r, cur_r) + damp_sq * dot(x, x)  # Compute residual norm
-                print(f"[Iter {iter_total+1}] res: {res:.2e}")
+            # if verbose:
+            cur_r = saxpy(-1.0, matvec(x), b)         # r0 = b - A x0
+            res = dot(cur_r, cur_r) + dot(x, x, damp)  # Compute residual norm
+            print(f"[Iter {iter_total+1}] res: {res:.2e}")
+            if res > last_res:
+                print("Warning: Residual norm increased!")
+                break_flag = True
+                break
+
+            last_res = res
 
             if gamma < max(tol * (gamma_prev ** 0.5), atol):
                 if verbose:
                     print(f"Convergence achieved at iteration {iter_total+1}.")
+                break_flag = True
                 break
+
+        if break_flag:
+            break
 
     return x
 

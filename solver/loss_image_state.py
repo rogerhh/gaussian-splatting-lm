@@ -1,6 +1,149 @@
 import torch
 import torch.autograd.forward_ad as fwAD
 
+class GroupedMultiLossImageState:
+    """
+    Represents the loss of multiple images as a generalized vector.
+    The memory layout is such that the losses of the same type across all images are contiguous.
+    """
+
+    def __init__(self, Ll1_per_pixel, ssim_loss_per_pixel, Ll1depth_per_pixel, sizes_list, has_depth):
+        self.Ll1_per_pixel = Ll1_per_pixel
+        self.ssim_loss_per_pixel = ssim_loss_per_pixel
+        self.Ll1depth_per_pixel = Ll1depth_per_pixel
+
+        self.Ll1_scalar = torch.linalg.vector_norm(Ll1_per_pixel.flatten(), ord=2) ** 2
+        self.ssim_loss_scalar = torch.linalg.vector_norm(ssim_loss_per_pixel.flatten(), ord=2) ** 2
+        self.Ll1depth_scalar = torch.linalg.vector_norm(Ll1depth_per_pixel.flatten(), ord=2) ** 2
+        self.loss_scalar = self.Ll1_scalar + self.ssim_loss_scalar + self.Ll1depth_scalar
+        assert self.Ll1depth_per_pixel is not None, "Ll1depth_per_pixel must not be None"
+
+        self.sizes_list = sizes_list  # List of tuples (H, W) for each image
+        self.has_depth = has_depth  # Boolean indicating if depth loss is included
+
+    def check_invariant(self):
+        Ll1_clone = self.Ll1_per_pixel.clone()
+        ssim_clone = self.ssim_loss_per_pixel.clone()
+        Ll1depth_clone = self.Ll1depth_per_pixel.clone()
+        for i, (H, W) in enumerate(self.sizes_list):
+            Ll1_clone[i, :, :H, :W] = 0
+            ssim_clone[i, :, :H, :W] = 0
+            if self.has_depth:
+                Ll1depth_clone[i, :, :H, :W] = 0
+
+        assert torch.all(Ll1_clone == 0), "Ll1_per_pixel has values outside valid image regions"
+        assert torch.all(ssim_clone == 0), "ssim_loss_per_pixel has values outside valid image regions"
+        if self.has_depth:
+            assert torch.all(Ll1depth_clone == 0), "Ll1depth_per_pixel has values outside valid image regions"
+
+
+    @property
+    def length(self):
+        """
+        Returns the length of the generalized vector
+        """
+        Ll1_numel = 0
+        ssim_numel = 0
+        depth_numel = 0
+        for H, W in self.sizes_list:
+            Ll1_numel += 3 * H * W  # 3 channels
+            ssim_numel += 3 * H * W  # 3 channels
+            depth_numel += H * W
+        if not self.has_depth:
+            depth_numel = 0
+        return Ll1_numel + ssim_numel + depth_numel
+
+    def index_to_desc(self, index):
+        N1 = self.Ll1_per_pixel.numel()
+        N2 = self.ssim_loss_per_pixel.numel()
+        N3 = self.Ll1depth_per_pixel.numel()
+
+        assert index < self.length, "Index out of bounds for GroupedMultiLossImageState"
+
+        def find_coord(offset, shape):
+            coords = []
+            for dim in reversed(shape):
+                coords.append(offset % dim)
+                offset //= dim
+            return tuple(reversed(coords))
+
+        name_offsets = [(N1, "Ll1_per_pixel"), (N2, "ssim_loss_per_pixel"), (N3, "Ll1depth_per_pixel")]
+        
+        for l, name in name_offsets:
+            if index < l:
+                offset = index
+                return name, find_coord(offset, getattr(self, name).shape)
+            index -= l
+
+    def unpack_dual(self):
+        L1_primal, L1_tangent = fwAD.unpack_dual(self.Ll1_per_pixel)
+        ssim_primal, ssim_tangent = fwAD.unpack_dual(self.ssim_loss_per_pixel)
+        Ll1depth_primal, Ll1depth_tangent = fwAD.unpack_dual(self.Ll1depth_per_pixel)
+
+        L1_tangent = L1_tangent if L1_tangent is not None else torch.zeros_like(L1_primal)
+        ssim_tangent = ssim_tangent if ssim_tangent is not None else torch.zeros_like(ssim_primal)
+        Ll1depth_tangent = Ll1depth_tangent if Ll1depth_tangent is not None else torch.zeros_like(Ll1depth_primal)
+
+        primal = GroupedMultiLossImageState(L1_primal, ssim_primal, Ll1depth_primal, self.sizes_list, self.has_depth)
+        tangent = GroupedMultiLossImageState(L1_tangent, ssim_tangent, Ll1depth_tangent, self.sizes_list, self.has_depth)
+
+        return primal, tangent
+
+    def backward(self, v, retain_graph=False):
+        assert isinstance(v, GroupedMultiLossImageState), "v must be an instance of GroupedMultiLossImageState"
+        self.Ll1_per_pixel.backward(v.Ll1_per_pixel, retain_graph=retain_graph)
+        self.ssim_loss_per_pixel.backward(v.ssim_loss_per_pixel, retain_graph=retain_graph)
+        self.Ll1depth_per_pixel.backward(v.Ll1depth_per_pixel, retain_graph=retain_graph)
+
+    def zero_like(self):
+        return GroupedMultiLossImageState(
+            torch.zeros_like(self.Ll1_per_pixel),
+            torch.zeros_like(self.ssim_loss_per_pixel),
+            torch.zeros_like(self.Ll1depth_per_pixel),
+            self.sizes_list,
+            self.has_depth
+        )
+
+    def __add__(self, other):
+        return GroupedMultiLossImageState(
+                self.Ll1_per_pixel + other.Ll1_per_pixel,
+                self.ssim_loss_per_pixel + other.ssim_loss_per_pixel,
+                self.Ll1depth_per_pixel + other.Ll1depth_per_pixel,
+                self.sizes_list,
+                self.has_depth)
+
+    def __sub__(self, other):
+        return GroupedMultiLossImageState(
+            self.Ll1_per_pixel - other.Ll1_per_pixel,
+            self.ssim_loss_per_pixel - other.ssim_loss_per_pixel,
+            self.Ll1depth_per_pixel - other.Ll1depth_per_pixel,
+            self.sizes_list,
+            self.has_depth)
+
+    def __mul__(self, other):
+        if isinstance(other, (int, float)):
+            return GroupedMultiLossImageState(
+                self.Ll1_per_pixel * other,
+                self.ssim_loss_per_pixel * other,
+                self.Ll1depth_per_pixel * other,
+                self.sizes_list,
+                self.has_depth)
+        else:
+            raise TypeError("Can only multiply by scalar values")
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    def dot(self, other, damp):
+        if isinstance(damp, (int, float)):
+            s = torch.sum(self.Ll1_per_pixel * other.Ll1_per_pixel) + \
+                torch.sum(self.ssim_loss_per_pixel * other.ssim_loss_per_pixel) + \
+                torch.sum(self.Ll1depth_per_pixel * other.Ll1depth_per_pixel)
+            s *= damp
+        else:
+            raise TypeError("Damping factor must be a scalar")
+        return s.item()
+
 class LossImageState:
     """
     Represents the loss as a generalized vector.
@@ -120,10 +263,14 @@ class LossImageState:
     def __rmul__(self, other):
         return self.__mul__(other)
 
-    def dot(self, other):
-        s = torch.sum(self.Ll1_per_pixel * other.Ll1_per_pixel) + \
-            torch.sum(self.ssim_loss_per_pixel * other.ssim_loss_per_pixel) + \
-            torch.sum(self.Ll1depth_per_pixel * other.Ll1depth_per_pixel)
+    def dot(self, other, damp):
+        if isinstance(damp, (int, float)):
+            s = torch.sum(self.Ll1_per_pixel * other.Ll1_per_pixel) + \
+                torch.sum(self.ssim_loss_per_pixel * other.ssim_loss_per_pixel) + \
+                torch.sum(self.Ll1depth_per_pixel * other.Ll1depth_per_pixel)
+            s *= damp
+        else:
+            raise TypeError("Damping factor must be a scalar")
         return s.item()  # Return a scalar value
      
 
@@ -209,5 +356,5 @@ class MultiLossImageState:
     def __rmul__(self, other):
         return self.__mul__(other)
 
-    def dot(self, other):
-        return sum(loss_state.dot(other_loss_state) for loss_state, other_loss_state in zip(self.loss_states, other.loss_states))
+    def dot(self, other, damp):
+        return sum(loss_state.dot(other_loss_state, damp) for loss_state, other_loss_state in zip(self.loss_states, other.loss_states))

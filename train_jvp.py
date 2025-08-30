@@ -28,8 +28,8 @@ import math
 from contextlib import contextmanager
 
 from functools import partial
-from solver.gaussian_model_state import GaussianModelState
-from solver.training_loss import training_loss
+from solver.gaussian_model_state import GaussianModelState, GaussianModelDampMatrix, GaussianModelParamGroupMask, GaussianModelSplatMask
+from solver.batch_training_loss import batch_training_loss
 from solver.solver_functions import LinearSolverFunctions
 from solver.conjugate_gradient import cgls_damped
 
@@ -68,7 +68,7 @@ def temp_seed(seed):
         np.random.set_state(np_state)
         torch.random.set_rng_state(torch_state)
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, jvp_start, num_images):
     print("after training called")
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
@@ -115,10 +115,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             except Exception as e:
                 network_gui.conn = None
 
-        use_second_order = iteration < 150
+        use_first_order = iteration < jvp_start
 
         iter_start.record()
-        if use_second_order:
+        if use_first_order:
 
             gaussians.update_learning_rate(iteration)
 
@@ -133,8 +133,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             rand_idx = randint(0, len(viewpoint_indices) - 1)
             viewpoint_cam = viewpoint_stack[rand_idx]
             vind = viewpoint_indices[rand_idx]
-            # viewpoint_cam = viewpoint_stack.pop(rand_idx)
-            # vind = viewpoint_indices.pop(rand_idx)
 
             # Render
             if (iteration - 1) == debug_from:
@@ -179,9 +177,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             loss.backward()
 
-            # if iteration == 949:
-            #     safe_interact(local=locals(), banner="iteration == 949")
-
         else:
 
             gaussians.update_learning_rate(iteration)
@@ -195,40 +190,60 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 viewpoint_stack = scene.getTrainCameras().copy()
                 viewpoint_indices = list(range(len(viewpoint_stack)))
 
-            num_batch_cameras = min(5, len(viewpoint_indices))
+            num_batch_cameras = min(num_images, len(viewpoint_indices))
             # rand_indices = np.random.choice(viewpoint_indices, num_batch_cameras, replace=False)
-            # with temp_seed(42):
-            rand_index_start = np.random.randint(0, len(viewpoint_indices) - num_batch_cameras)
-            rand_indices = list(range(rand_index_start, rand_index_start + num_batch_cameras))
+
+            stride = np.random.randint(1, 4)
+            rand_index_start = np.random.randint(0, len(viewpoint_indices) - num_batch_cameras * stride)
+            rand_indices = list(range(rand_index_start, rand_index_start + num_batch_cameras * stride, stride))
+
             print(f"\n[ITER {iteration}] Using {num_batch_cameras} random cameras: {rand_indices}")
-            loss_functions = []
             # Same background for all cameras in the batch
             bg = torch.rand((3), device="cuda") if opt.random_background else background
-            # gaussians.save_ply(os.path.join(scene.model_path, "gaussians.ply"))
+            viewpoint_cams = []
             for rand_idx in rand_indices:
                 viewpoint_cam = viewpoint_stack[rand_idx]
+                viewpoint_cams.append(viewpoint_cam)
 
-                # Render
-                if (iteration - 1) == debug_from:
-                    pipe.debug = True
+            # Render
+            if (iteration - 1) == debug_from:
+                pipe.debug = True
 
-                # func_args = {"iteration": iteration, "opt": opt, "viewpoint_cam": viewpoint_cam, "pipe": pipe, "bg": bg, "dataset": dataset}
-                # torch.save(func_args, f"func_args-{rand_idx}.pth")
+            loss_func = partial(batch_training_loss, iteration=iteration, opt=opt, viewpoint_cams=viewpoint_cams, pipe=pipe, bg=bg, train_test_exp=dataset.train_test_exp, depth_l1_weight=depth_l1_weight)
 
-                loss_func = partial(training_loss, iteration=iteration, opt=opt, viewpoint_cam=viewpoint_cam, pipe=pipe, bg=bg, train_test_exp=dataset.train_test_exp, depth_l1_weight=depth_l1_weight)
-                loss_functions.append(loss_func)
+            val_indices = [(idx * 19) % len(scene.getTrainCameras()) for idx in range(0, 50)]
+            # val_indices = rand_indices
+            val_viewpoint_cams = [viewpoint_stack[idx] for idx in val_indices]
+            # Val Render
+            if (iteration - 1) == debug_from:
+                pipe.debug = True
+            val_loss_func = partial(batch_training_loss, iteration=iteration, opt=opt, viewpoint_cams=val_viewpoint_cams, pipe=pipe, bg=bg, train_test_exp=dataset.train_test_exp, depth_l1_weight=depth_l1_weight)
 
+            param_mask = GaussianModelParamGroupMask(mask_xyz=True, 
+                                                     mask_features_dc=False, 
+                                                     mask_features_rest=False, 
+                                                     mask_scaling=True, 
+                                                     mask_rotation=False, 
+                                                     mask_opacity=False, 
+                                                     mask_exposure=False)
+
+            damp = GaussianModelDampMatrix(xyz_damp=5e2, 
+                                           features_dc_damp=5e1, 
+                                           features_rest_damp=5e1, 
+                                           scaling_damp=5e1, 
+                                           rotation_damp=5e1, 
+                                           opacity_damp=5e1, 
+                                           exposure_damp=1e1)
 
             for step in range(1): 
                 print(f"\nStep {step}")
-                cur_state = LinearSolverFunctions(gaussians)
-                cur_state.set_loss_functions(loss_functions)
+                cur_state = LinearSolverFunctions(gaussians, param_mask=param_mask)
+                cur_state.set_loss_functions(loss_func)
                 start_loss = cur_state.loss_scalar
                 print(f"Initial loss: {start_loss:.6f}")
                 with torch.no_grad():
                     b = -1 * cur_state.loss
-                    s0 = GaussianModelState.from_gaussians(gaussians)
-                    # import code; code.interact(local=locals(), banner="before cgls_damped")
+                    s0 = cur_state.get_initial_solution()
                     s = cgls_damped(
                         matvec=cur_state.matvec,
                         matvec_T=cur_state.matvec_T,
@@ -236,24 +251,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         saxpy=cur_state.saxpy,
                         b=b,
                         x0=s0,
-                        damp=1e-2,
+                        damp=damp,
                         tol=1e-10,
                         atol=0.0,
-                        max_iter=2,
-                        restart_iter=5,
+                        max_iter=10,
+                        restart_iter=1,
                         verbose=True,
                     )
-                    # safe_interact(local=locals(), banner="after cgls_damped")
-                    alpha = 0.1
+                    del cur_state
+                    torch.cuda.empty_cache()
+
+                    val_state = LinearSolverFunctions(gaussians)
+                    val_state.set_loss_functions(val_loss_func)
+                    alpha = 2.0
                     best_alpha = alpha
-                    best_loss = start_loss
+                    best_loss = torch.inf
                     gaussians.update_step(alpha * s)
-                    for i in range(2):
-                        cur_state.evaluate_loss()
-                        loss = cur_state.loss_scalar
+                    for i in range(6):
+                        val_state.evaluate_loss()
+                        loss = val_state.loss_scalar
                         print("alpha = {}, loss = {}".format(alpha, loss))
-                        # if loss < best_loss:
-                        if True:
+                        if loss < best_loss:
                             best_loss = loss
                             best_alpha = alpha
                         new_alpha = alpha * 0.5
@@ -262,15 +280,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         alpha = new_alpha
                     best_update = best_alpha - alpha
                     gaussians.update_step(best_update * s)
-                    cur_state.evaluate_loss()
-                    loss = cur_state.loss_scalar
-                    Ll1 = cur_state.Ll1_scalar
-                    Ll1depth = cur_state.depth_loss_scalar
-                    visibility_filter = cur_state.get_batch_stats["visibility_mask"].nonzero().squeeze()
-                    radii = cur_state.get_batch_stats["max_radii2D"]
+                    val_state.evaluate_loss()
+                    loss = val_state.loss_scalar
+                    Ll1 = val_state.Ll1_scalar
+                    Ll1depth = val_state.depth_loss_scalar
+                    visibility_filter = val_state.get_batch_stats["visibility_filter"]
+                    radii = val_state.get_batch_stats["max_radii"]
+                    viewcount = val_state.get_batch_stats["viewcount"]
 
-                print(f"Step {step} completed, loss: {cur_state.loss_scalar:.6f}")
+                print(f"Step {step} completed, loss: {val_state.loss_scalar:.6f}")
 
+                print(f"xyz step size norm = {torch.norm(s.xyz_grad)}, features_dc step size norm = {torch.norm(s.features_dc_grad)}, features_rest step size norm = {torch.norm(s.features_rest_grad)}, scaling step size norm = {torch.norm(s.scaling_grad)}, rotation step size norm = {torch.norm(s.rotation_grad)}, opacity step size norm = {torch.norm(s.opacity_grad)}, exposure step size norm = {torch.norm(s.exposure_grad)}")
+
+                del val_state
                 del s, s0, b
                 torch.cuda.empty_cache()
 
@@ -290,7 +312,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
+            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp, jvp_start)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -300,7 +322,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 # Disabling positional gradient based densification
-                # gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
 
@@ -311,7 +333,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.reset_opacity()
 
             # Optimizer step
-            if use_second_order:
+            if use_first_order:
                 if iteration < opt.iterations:
                     gaussians.exposure_optimizer.step()
                     gaussians.exposure_optimizer.zero_grad(set_to_none = True)
@@ -349,7 +371,7 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, train_test_exp):
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, train_test_exp, jvp_start):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -357,12 +379,14 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
 
     # Report test and samples of training set
 
-    # DEBUG
-    # if True:
-    if iteration in testing_iterations or iteration >= 150:
+    if iteration in testing_iterations or iteration >= jvp_start:
         torch.cuda.empty_cache()
+        num_val_images = 30
+        val_stride = max(1, len(scene.getTrainCameras()) // num_val_images)
+        val_indices = list(range(0, len(scene.getTrainCameras()), val_stride))
         validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
-                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
+                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx] for idx in val_indices]} )
+        print(f"\n[ITER {iteration}] val_indices: {val_indices}")
 
         for config in validation_configs:
             if config['cameras'] and len(config['cameras']) > 0:
@@ -410,6 +434,8 @@ if __name__ == "__main__":
     parser.add_argument('--disable_viewer', action='store_true', default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--jvp_start", type=int, default = 15001)
+    parser.add_argument("--num_images", type=int, default = 5)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
@@ -422,7 +448,7 @@ if __name__ == "__main__":
     if not args.disable_viewer:
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.jvp_start, args.num_images)
 
     # All done
     print("\nTraining complete.")

@@ -1,23 +1,8 @@
 import math
 import torch
 import torch.autograd.forward_ad as fwAD
-from solver.gaussian_model_state import GaussianModelState
-from solver.loss_image_state import MultiLossImageState
-
-class MultiLoss:
-    """
-    Aggregates multiple loss functions into one
-    """
-    def __init__(self, loss_functions):
-        self.loss_functions = loss_functions
-
-    def __call__(self, gaussians, batch_stats=None):
-        """
-        Compute the aggregated loss from the Gaussian model state.
-        """
-        return MultiLossImageState([loss_function(gaussians=gaussians, 
-                                                  batch_stats=batch_stats) 
-                                    for loss_function in self.loss_functions])
+from solver.gaussian_model_state import GaussianModelState, GaussianModelParamGroupMask, GaussianModelSplatMask
+from solver.loss_image_state import MultiLossImageState, GroupedMultiLossImageState
 
 def print_backwards_graph(gfn, indent=0):
     print(" " * indent, gfn)
@@ -29,31 +14,30 @@ def print_backwards_graph(gfn, indent=0):
 
 class LinearSolverFunctions:
 
-    def __init__(self, gaussians):
+    def __init__(self, gaussians, param_mask=None, splat_mask=None):
         self.gaussians = gaussians
+        self.param_mask = param_mask
+        self.splat_mask = splat_mask
 
-    def set_loss_functions(self, loss_functions):
+    def get_initial_solution(self):
+        s0 = GaussianModelState.from_gaussians(self.gaussians, param_mask=self.param_mask, splat_mask=self.splat_mask)
+        return s0
+
+    def set_loss_functions(self, loss_func):
         """
         Set the loss functions used in the solver.
         """
-        visibility_mask = torch.zeros(self.gaussians.get_xyz.shape[0], 
-                                                 dtype=torch.bool, 
-                                                 device=self.gaussians.get_xyz.device)
-        max_radii2D = torch.zeros(self.gaussians.get_xyz.shape[0], 
-                                       dtype=torch.int, 
-                                       device=self.gaussians.get_xyz.device)
-        self.batch_stats = {"visibility_mask": visibility_mask,
-                            "max_radii2D": max_radii2D}
-        self.multiloss = MultiLoss(loss_functions)
+        self.batch_stats = {}
+        self.loss_func = loss_func
         # This is needed because later we will run loss_functions with no_grad
-        self.evaluate_loss(accum_stats=True)
+        self.evaluate_loss(with_batch_stats=True)
 
-    def evaluate_loss(self, accum_stats=False):
+    def evaluate_loss(self, with_batch_stats=False):
         """
         Evaluate the loss functions on the current Gaussian model state.
         """
-        batch_stats = self.batch_stats if accum_stats else None
-        self.loss = self.multiloss(self.gaussians, batch_stats=batch_stats)
+        batch_stats = self.batch_stats if with_batch_stats else None
+        self.loss = self.loss_func(gaussians=self.gaussians, batch_stats=batch_stats)
         return self.loss
 
     @property
@@ -87,17 +71,18 @@ class LinearSolverFunctions:
     def matvec(self, v):
         assert isinstance(v, GaussianModelState), "v must be an instance of GaussianModelState"
 
-        with fwAD.dual_level(), self.gaussians.make_dual(v):
-            loss_dual = self.multiloss(self.gaussians)
+        with torch.no_grad(), fwAD.dual_level(), self.gaussians.make_dual(v):
+            loss_dual = self.loss_func(gaussians=self.gaussians)
             loss_primal, loss_tangent = loss_dual.unpack_dual()
 
             return loss_tangent
 
     def matvec_T(self, vs):
-        assert isinstance(vs, MultiLossImageState), "vs must be an instance of MultiLossImageState"
+        assert isinstance(vs, MultiLossImageState) or isinstance(vs, GroupedMultiLossImageState), "vs must be an instance of MultiLossImageState or GroupedMultiLossImageState"
 
-        self.gaussians.zero_grad()
-        self.loss.backward(vs, retain_graph=True)
+        with torch.enable_grad():
+            self.gaussians.zero_grad()
+            self.loss.backward(vs, retain_graph=True)
 
         assert not torch.isnan(self.gaussians._xyz.grad).any(), "NaN detected in gaussians._xyz.grad"
         assert not torch.isnan(self.gaussians._features_dc.grad).any(), "NaN detected in gaussians._features_dc.grad"
@@ -106,10 +91,10 @@ class LinearSolverFunctions:
         assert not torch.isnan(self.gaussians._rotation.grad).any(), "NaN detected in gaussians._rotation.grad"
         assert not torch.isnan(self.gaussians._opacity.grad).any(), "NaN detected in gaussians._opacity.grad"
 
-        return GaussianModelState.from_gaussians_grad(self.gaussians)
+        return GaussianModelState.from_gaussians_grad(self.gaussians, param_mask=self.param_mask, splat_mask=self.splat_mask)
 
-    def dot(self, v1, v2):
-        return v1.dot(v2)
+    def dot(self, v1, v2, damp=1.0):
+        return v1.dot(v2, damp)
 
     def saxpy(self, a, x, y):
         return a * x + y
