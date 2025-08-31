@@ -105,4 +105,4 @@ def scalar_training_loss(iteration, opt, viewpoint_cam, gaussians, pipe, bg, tra
     else:
         Ll1depth = 0
 
-    return loss
+    return loss, Ll1, Ll1depth

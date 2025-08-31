@@ -20,7 +20,7 @@ from contextlib import contextmanager
 
 from functools import partial
 from solver.gaussian_model_state import GaussianModelState
-from solver.training_loss import training_loss, scalar_training_loss
+from solver.training_loss import training_loss
 from solver.batch_training_loss import batch_training_loss
 from solver.solver_functions import LinearSolverFunctions
 from solver.conjugate_gradient import cgls_damped
