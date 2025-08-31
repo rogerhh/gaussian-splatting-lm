@@ -193,7 +193,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             num_batch_cameras = min(num_images, len(viewpoint_indices))
             # rand_indices = np.random.choice(viewpoint_indices, num_batch_cameras, replace=False)
 
-            stride = np.random.randint(1, 4)
+            stride = 1 # np.random.randint(1, 4)
             rand_index_start = np.random.randint(0, len(viewpoint_indices) - num_batch_cameras * stride)
             rand_indices = list(range(rand_index_start, rand_index_start + num_batch_cameras * stride, stride))
 
@@ -209,7 +209,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration - 1) == debug_from:
                 pipe.debug = True
 
-            loss_func = partial(batch_training_loss, iteration=iteration, opt=opt, viewpoint_cams=viewpoint_cams, pipe=pipe, bg=bg, train_test_exp=dataset.train_test_exp, depth_l1_weight=depth_l1_weight)
+            loss_func = partial(batch_training_loss, iteration=iteration, opt=opt, pipe=pipe, bg=bg, train_test_exp=dataset.train_test_exp, depth_l1_weight=depth_l1_weight, disable_ssim=True)
 
             val_indices = [(idx * 19) % len(scene.getTrainCameras()) for idx in range(0, 50)]
             # val_indices = rand_indices
@@ -217,29 +217,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Val Render
             if (iteration - 1) == debug_from:
                 pipe.debug = True
-            val_loss_func = partial(batch_training_loss, iteration=iteration, opt=opt, viewpoint_cams=val_viewpoint_cams, pipe=pipe, bg=bg, train_test_exp=dataset.train_test_exp, depth_l1_weight=depth_l1_weight)
 
             param_mask = GaussianModelParamGroupMask(mask_xyz=True, 
                                                      mask_features_dc=False, 
                                                      mask_features_rest=False, 
-                                                     mask_scaling=True, 
+                                                     mask_scaling=False, 
                                                      mask_rotation=False, 
                                                      mask_opacity=False, 
                                                      mask_exposure=False)
 
             damp = GaussianModelDampMatrix(xyz_damp=5e2, 
-                                           features_dc_damp=5e1, 
-                                           features_rest_damp=5e1, 
-                                           scaling_damp=5e1, 
-                                           rotation_damp=5e1, 
-                                           opacity_damp=5e1, 
+                                           features_dc_damp=5e-2, 
+                                           features_rest_damp=5e-2, 
+                                           scaling_damp=5e-2, 
+                                           rotation_damp=5e-2, 
+                                           opacity_damp=5e-2, 
                                            exposure_damp=1e1)
 
             for step in range(1): 
                 print(f"\nStep {step}")
-                cur_state = LinearSolverFunctions(gaussians, param_mask=param_mask)
-                cur_state.set_loss_functions(loss_func)
-                start_loss = cur_state.loss_scalar
+                cur_state = LinearSolverFunctions(loss_func, gaussians, viewpoint_cams, batch_size=20, param_mask=param_mask)
+                start_loss = cur_state.evaluate_loss().loss_scalar
                 print(f"Initial loss: {start_loss:.6f}")
                 with torch.no_grad():
                     b = -1 * cur_state.loss
@@ -254,25 +252,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         damp=damp,
                         tol=1e-10,
                         atol=0.0,
-                        max_iter=10,
+                        max_iter=2,
                         restart_iter=1,
                         verbose=True,
                     )
                     del cur_state
                     torch.cuda.empty_cache()
 
-                    val_state = LinearSolverFunctions(gaussians)
-                    val_state.set_loss_functions(val_loss_func)
+                    val_loss_func = partial(loss_func, gaussians=gaussians, viewpoint_cams=val_viewpoint_cams)
+
                     alpha = 2.0
                     best_alpha = alpha
                     best_loss = torch.inf
                     gaussians.update_step(alpha * s)
                     for i in range(6):
-                        val_state.evaluate_loss()
-                        loss = val_state.loss_scalar
-                        print("alpha = {}, loss = {}".format(alpha, loss))
-                        if loss < best_loss:
-                            best_loss = loss
+                        val_loss = val_loss_func().loss_scalar
+                        print("alpha = {}, loss = {}".format(alpha, val_loss))
+                        if val_loss < best_loss:
+                            best_loss = val_loss
                             best_alpha = alpha
                         new_alpha = alpha * 0.5
                         alpha_update = new_alpha - alpha
@@ -280,19 +277,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         alpha = new_alpha
                     best_update = best_alpha - alpha
                     gaussians.update_step(best_update * s)
-                    val_state.evaluate_loss()
-                    loss = val_state.loss_scalar
-                    Ll1 = val_state.Ll1_scalar
-                    Ll1depth = val_state.depth_loss_scalar
-                    visibility_filter = val_state.get_batch_stats["visibility_filter"]
-                    radii = val_state.get_batch_stats["max_radii"]
-                    viewcount = val_state.get_batch_stats["viewcount"]
+                    val_loss = val_loss_func().loss_scalar
 
-                print(f"Step {step} completed, loss: {val_state.loss_scalar:.6f}")
+                print(f"Step {step} completed, loss: {val_loss:.6f}")
 
                 print(f"xyz step size norm = {torch.norm(s.xyz_grad)}, features_dc step size norm = {torch.norm(s.features_dc_grad)}, features_rest step size norm = {torch.norm(s.features_rest_grad)}, scaling step size norm = {torch.norm(s.scaling_grad)}, rotation step size norm = {torch.norm(s.rotation_grad)}, opacity step size norm = {torch.norm(s.opacity_grad)}, exposure step size norm = {torch.norm(s.exposure_grad)}")
 
-                del val_state
+                del val_loss
                 del s, s0, b
                 torch.cuda.empty_cache()
 

@@ -1,7 +1,8 @@
 import torch
 import torch.autograd.forward_ad as fwAD
+import itertools
 
-class GroupedMultiLossImageState:
+class BatchLossImageState:
     """
     Represents the loss of multiple images as a generalized vector.
     The memory layout is such that the losses of the same type across all images are contiguous.
@@ -58,7 +59,7 @@ class GroupedMultiLossImageState:
         N2 = self.ssim_loss_per_pixel.numel()
         N3 = self.Ll1depth_per_pixel.numel()
 
-        assert index < self.length, "Index out of bounds for GroupedMultiLossImageState"
+        assert index < self.length, "Index out of bounds for BatchLossImageState"
 
         def find_coord(offset, shape):
             coords = []
@@ -84,19 +85,19 @@ class GroupedMultiLossImageState:
         ssim_tangent = ssim_tangent if ssim_tangent is not None else torch.zeros_like(ssim_primal)
         Ll1depth_tangent = Ll1depth_tangent if Ll1depth_tangent is not None else torch.zeros_like(Ll1depth_primal)
 
-        primal = GroupedMultiLossImageState(L1_primal, ssim_primal, Ll1depth_primal, self.sizes_list, self.has_depth)
-        tangent = GroupedMultiLossImageState(L1_tangent, ssim_tangent, Ll1depth_tangent, self.sizes_list, self.has_depth)
+        primal = BatchLossImageState(L1_primal, ssim_primal, Ll1depth_primal, self.sizes_list, self.has_depth)
+        tangent = BatchLossImageState(L1_tangent, ssim_tangent, Ll1depth_tangent, self.sizes_list, self.has_depth)
 
         return primal, tangent
 
     def backward(self, v, retain_graph=False):
-        assert isinstance(v, GroupedMultiLossImageState), "v must be an instance of GroupedMultiLossImageState"
+        assert isinstance(v, BatchLossImageState), "v must be an instance of BatchLossImageState"
         self.Ll1_per_pixel.backward(v.Ll1_per_pixel, retain_graph=retain_graph)
         self.ssim_loss_per_pixel.backward(v.ssim_loss_per_pixel, retain_graph=retain_graph)
         self.Ll1depth_per_pixel.backward(v.Ll1depth_per_pixel, retain_graph=retain_graph)
 
     def zero_like(self):
-        return GroupedMultiLossImageState(
+        return BatchLossImageState(
             torch.zeros_like(self.Ll1_per_pixel),
             torch.zeros_like(self.ssim_loss_per_pixel),
             torch.zeros_like(self.Ll1depth_per_pixel),
@@ -105,7 +106,7 @@ class GroupedMultiLossImageState:
         )
 
     def __add__(self, other):
-        return GroupedMultiLossImageState(
+        return BatchLossImageState(
                 self.Ll1_per_pixel + other.Ll1_per_pixel,
                 self.ssim_loss_per_pixel + other.ssim_loss_per_pixel,
                 self.Ll1depth_per_pixel + other.Ll1depth_per_pixel,
@@ -113,7 +114,7 @@ class GroupedMultiLossImageState:
                 self.has_depth)
 
     def __sub__(self, other):
-        return GroupedMultiLossImageState(
+        return BatchLossImageState(
             self.Ll1_per_pixel - other.Ll1_per_pixel,
             self.ssim_loss_per_pixel - other.ssim_loss_per_pixel,
             self.Ll1depth_per_pixel - other.Ll1depth_per_pixel,
@@ -122,7 +123,7 @@ class GroupedMultiLossImageState:
 
     def __mul__(self, other):
         if isinstance(other, (int, float)):
-            return GroupedMultiLossImageState(
+            return BatchLossImageState(
                 self.Ll1_per_pixel * other,
                 self.ssim_loss_per_pixel * other,
                 self.Ll1depth_per_pixel * other,
@@ -143,6 +144,60 @@ class GroupedMultiLossImageState:
         else:
             raise TypeError("Damping factor must be a scalar")
         return s.item()
+
+class MultiBatchLossImageState:
+    """
+    Represents multiple batch losses as a generalized vector.
+    """
+    def __init__(self, batch_losses):
+        self.batch_losses = batch_losses
+        self.Ll1_scalar = sum(loss.Ll1_scalar for loss in self.batch_losses)
+        self.ssim_loss_scalar = sum(loss.ssim_loss_scalar for loss in self.batch_losses)
+        self.Ll1depth_scalar = sum(loss.Ll1depth_scalar for loss in self.batch_losses)
+        self.loss_scalar = self.Ll1_scalar + self.ssim_loss_scalar + self.Ll1depth_scalar
+
+    def check_invariant(self):
+        for loss in self.batch_losses:
+            loss.check_invariant()
+
+    @property
+    def length(self):
+        """
+        Returns the length of the generalized vector
+        """
+        return sum(loss.length for loss in self.batch_losses)
+
+    def unpack_dual(self):
+        duals = [loss.unpack_dual() for loss in self.batch_losses]
+        primals = [dual[0] for dual in duals]
+        tangents = [dual[1] for dual in duals]
+        primal = MultiBatchLossImageState(primals)
+        tangent = MultiBatchLossImageState(tangents)
+        return primal, tangent
+
+    def backward(self, v, retain_graph=False):
+        assert isinstance(v, MultiBatchLossImageState), "v must be an instance of MultiBatchLossImageState"
+        for loss, v_loss in zip(self.batch_losses, v.batch_losses):
+            loss.backward(v_loss, retain_graph=retain_graph)
+
+
+    def zero_like(self):
+        return MultiBatchLossImageState([loss.zero_like() for loss in self.batch_losses])
+
+    def __add__(self, other):
+        return MultiBatchLossImageState([loss + other_loss for loss, other_loss in zip(self.batch_losses, other.batch_losses)])
+
+    def __sub__(self, other):
+        return MultiBatchLossImageState([loss - other_loss for loss, other_loss in zip(self.batch_losses, other.batch_losses)])
+
+    def __mul__(self, other):
+        return MultiBatchLossImageState([loss * other for loss in self.batch_losses])
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    def dot(self, other, damp):
+        return sum(loss.dot(other_loss, damp) for loss, other_loss in zip(self.batch_losses, other.batch_losses))
 
 class LossImageState:
     """

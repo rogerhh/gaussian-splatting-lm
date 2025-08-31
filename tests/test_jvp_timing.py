@@ -27,6 +27,7 @@ from solver.batch_training_loss import batch_training_loss
 from solver.reference_training_loss import reference_training_loss
 from solver.training_loss import training_loss
 from solver.gaussian_model_state import GaussianModelState
+from solver.loss_image_state import MultiBatchLossImageState
 from solver.solver_functions import LinearSolverFunctions
 
 def training(dataset, opt, pipe, checkpoint, num_images):
@@ -67,25 +68,41 @@ def training(dataset, opt, pipe, checkpoint, num_images):
         viewpoint_cam = viewpoint_stack[rand_idx]
         viewpoint_cams.append(viewpoint_cam)
 
-    loss_func = partial(batch_training_loss, iteration=iteration, opt=opt, viewpoint_cams=viewpoint_cams, pipe=pipe, bg=bg, train_test_exp=dataset.train_test_exp, depth_l1_weight=depth_l1_weight)
-    cur_state = LinearSolverFunctions(gaussians)
-    cur_state.set_loss_functions(loss_func)
+    loss_func = partial(batch_training_loss, iteration=iteration, opt=opt, pipe=pipe, bg=bg, train_test_exp=dataset.train_test_exp, depth_l1_weight=depth_l1_weight, disable_ssim=True)
+
+    cur_state = LinearSolverFunctions(loss_func, gaussians, viewpoint_cams, batch_size=50)
 
     u = GaussianModelState.from_gaussians(gaussians)
 
-    NUM_ITERATIONS = 100
+    NUM_ITERATIONS = 5
+
+    # Warm up
+    for _ in range(NUM_ITERATIONS):
+        cur_state.evaluate_loss()
 
     matvec_start = time.time()
-    for _ in range(NUM_ITERATIONS):
+    for i in range(NUM_ITERATIONS):
+        print(f"Matvec iteration {i+1}/{NUM_ITERATIONS}")
         Ju = cur_state.matvec(u)
     matvec_end = time.time()
 
+    loss = cur_state.evaluate_loss()
+    v = loss.zero_like()
+
+    vecmat_start = time.time()
+    for i in range(NUM_ITERATIONS):
+        print(f"VecMat iteration {i+1}/{NUM_ITERATIONS}")
+        JTv = cur_state.matvec_T(v)
+    vecmat_end = time.time()
+
     forward_start = time.time()
-    for _ in range(NUM_ITERATIONS):
+    for i in range(NUM_ITERATIONS):
+        print(f"Forward iteration {i+1}/{NUM_ITERATIONS}")
         cur_state.evaluate_loss()
     forward_end = time.time()
 
     print(f"Matvec time: {(matvec_end - matvec_start) * 1000 / NUM_ITERATIONS:.6f} milliseconds per iteration")
+    print(f"VecMat time: {(vecmat_end - vecmat_start) * 1000 / NUM_ITERATIONS:.6f} milliseconds per iteration")
     print(f"Forward time: {(forward_end - forward_start) * 1000 / NUM_ITERATIONS:.6f} milliseconds per iteration")
 
     print("rand_indices:", rand_indices)

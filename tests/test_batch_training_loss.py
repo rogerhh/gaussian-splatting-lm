@@ -71,7 +71,7 @@ def training(dataset, opt, pipe, checkpoint, num_images):
 
     print("rand_indices:", rand_indices)
 
-    batch_loss = batch_training_loss(iteration=iteration, opt=opt, viewpoint_cams=viewpoint_cams, gaussians=gaussians, pipe=pipe, bg=bg, train_test_exp=dataset.train_test_exp, depth_l1_weight=depth_l1_weight)
+    batch_loss = batch_training_loss(iteration=iteration, opt=opt, viewpoint_cams=viewpoint_cams, gaussians=gaussians, pipe=pipe, bg=bg, train_test_exp=dataset.train_test_exp, depth_l1_weight=depth_l1_weight, disable_ssim=False)
 
     # Compute batch gradients
     gaussians.zero_grad()
