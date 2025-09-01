@@ -48,9 +48,70 @@ def conjugate_gradient(
 
     return x
 
+def cg_damped(
+    Ax,             # A @ x, here A is assumed to be SPD
+    dot,            # dot(x, y)
+    saxpy,          # ax + y
+    b,              # right-hand side
+    x0,             # initial guess
+    M=None,         # preconditioner M ~ A^-1
+    tol=1e-10,
+    atol=0.0,
+    max_iter=1000,
+    restart_iter=5, # restart every `restart_iter` iterations
+    callback=None,
+    verbose=False
+):
+    x = x0
+    iter_total = 0
+
+    break_flag = False
+
+    while iter_total < max_iter:
+        print(f"Restarting CG iteration {iter_total + 1}...") if verbose else None
+
+        r = saxpy(-1.0, Ax(x), b)         # r = b - A x
+        z = M(r) if M is not None else r  # z = M r
+        p = z
+
+        res = dot(r, r)
+        print(f"[Iter {iter_total}] res: {res:.2e}")
+
+        for k in range(restart_iter):
+            gamma = dot(r, z)                       # gamma = <r, z>
+            q = Ax(p)                               # q = A p
+            delta = dot(q, q) + dot(p, p)           # delta = <q, q> + λ^2 * <p, p>
+            if delta < 1e-15:
+                print("Early termination: delta is too small.")
+                break_flag = True
+                break
+            alpha = gamma / delta
+            x = saxpy(alpha, p, x)                  # x = x + alpha * p
+            r = saxpy(-alpha, q, r)                 # r = r - alpha * q
+            z = M(r) if M is not None else r        # z = M r
+            gamma_prev = gamma
+            gamma = dot(r, z)                       # Update gamma
+            beta = gamma / gamma_prev
+            p = saxpy(beta, p, z)                   # p = z + beta * p
+
+            # if verbose:
+            res = dot(r, r)
+            print(f"[Iter {iter_total+1}] res: {res:.2e}")
+
+            iter_total += 1
+            if iter_total >= max_iter:
+                break_flag = True
+                break
+
+        if break_flag:
+            break
+
+    return x
+
+
 def cgls_damped(
-    matvec,         # A @ x
-    matvec_T,       # A.T @ y
+    Ax,         # A @ x
+    Atx,       # A.T @ y
     dot,            # dot(x, y)
     saxpy,          # ax + y
     b,              # right-hand side
@@ -73,8 +134,8 @@ def cgls_damped(
     while iter_total < max_iter:
         print(f"Restarting CG iteration {iter_total + 1}...") if verbose else None
 
-        r0 = saxpy(-1.0, matvec(x), b)         # r0 = b - A x0
-        s0 = saxpy(-damp, x, matvec_T(r0))  # s0 = A^T r0 - λ^2 x0
+        r0 = saxpy(-1.0, Ax(x), b)         # r0 = b - A x0
+        s0 = saxpy(-damp, x, Atx(r0))  # s0 = A^T r0 - λ^2 x0
         p0 = s0
 
         r = r0
@@ -83,7 +144,7 @@ def cgls_damped(
         gamma = dot(s, s)  # Initial norm of s
 
         for k in range(restart_iter):
-            q = matvec(p)                  # q = A p
+            q = Ax(p)                  # q = A p
             delta = dot(q, q) + dot(p, p, damp)  # delta = <q, q> + λ^2 * <p, p>
             if delta < 1e-20:
                 print("Early termination: delta is too small.")
@@ -93,14 +154,14 @@ def cgls_damped(
             alpha = gamma / delta
             x = saxpy(alpha, p, x)         # x = x + alpha * p
             r = saxpy(-alpha, q, r)        # r = r - alpha * q
-            s = saxpy(-damp, x, matvec_T(r))  # s = A^T r - λ^2 x
+            s = saxpy(-damp, x, Atx(r))  # s = A^T r - λ^2 x
             gamma_prev = gamma
             gamma = dot(s, s)  # Update norm of s
             beta = gamma / gamma_prev
             p = saxpy(beta, p, s)          # p = s + beta * p
 
             # if verbose:
-            cur_r = saxpy(-1.0, matvec(x), b)         # r0 = b - A x0
+            cur_r = saxpy(-1.0, Ax(x), b)         # r0 = b - A x0
             res = dot(cur_r, cur_r) + dot(x, x, damp)  # Compute residual norm
             print(f"[Iter {iter_total+1}] res: {res:.2e}")
             if res > last_res:
