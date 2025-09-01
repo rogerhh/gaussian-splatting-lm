@@ -97,8 +97,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
 
-    gaussians.get_xyz.requires_grad = False
-
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
@@ -140,7 +138,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         num_batch_cameras = min(num_images, len(viewpoint_indices))
         # rand_indices = np.random.choice(viewpoint_indices, num_batch_cameras, replace=False)
 
-        stride = 1 # np.random.randint(1, 4)
+        stride = np.random.randint(1, 4)
         rand_index_start = np.random.randint(0, len(viewpoint_indices) - num_batch_cameras * stride)
         rand_indices = list(range(rand_index_start, rand_index_start + num_batch_cameras * stride, stride))
 
