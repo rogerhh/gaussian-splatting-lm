@@ -83,7 +83,6 @@ def cgls_damped(
         gamma = dot(s, s)  # Initial norm of s
 
         for k in range(restart_iter):
-            iter_total += 1
             q = matvec(p)                  # q = A p
             delta = dot(q, q) + dot(p, p, damp)  # delta = <q, q> + λ^2 * <p, p>
             if delta < 1e-20:
@@ -114,6 +113,11 @@ def cgls_damped(
             if gamma < max(tol * (gamma_prev ** 0.5), atol):
                 if verbose:
                     print(f"Convergence achieved at iteration {iter_total+1}.")
+                break_flag = True
+                break
+
+            iter_total += 1
+            if iter_total >= max_iter:
                 break_flag = True
                 break
 
