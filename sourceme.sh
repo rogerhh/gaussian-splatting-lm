@@ -1,6 +1,6 @@
 #!/bin/bash
 
-conda activate gaussian_splatting
+conda activate gaussian_splatting-jvp
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -15,6 +15,7 @@ if [ -z "$CONDA_PREFIX" ]; then
     return
 fi
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib/python3.11/site-packages/torch/lib:$LD_LIBRARY_PATH"
 
 export QT_QPA_PLATFORM=offscreen
 
