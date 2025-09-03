@@ -55,7 +55,7 @@ for trial in range(num_trials):
     v.load_1d_tensor(v_vec)
     print("rand row index = ", rand_row_idx, v.index_to_desc(rand_row_idx))
 
-    Jtv = cur_state.matvec_T(v).as_1d_tensor()
+    Jtv = cur_state.vjp(v).as_1d_tensor()
     v_vec[rand_row_idx] = 0
 
     P = gaussians.get_xyz.shape[0]
@@ -65,7 +65,7 @@ for trial in range(num_trials):
     rand_gid = torch.randint(0, P, (1,)).item()
     print("rand_gid = ", rand_gid)
 
-    u = GaussianModelState.from_gaussians(gaussians)
+    u = GaussianModelState.zero_like_gaussians(gaussians)
     u_vec = u.as_1d_tensor()
 
     with torch.no_grad():
@@ -76,7 +76,7 @@ for trial in range(num_trials):
                 u_vec[rand_col_idx] = 1
                 u.load_1d_tensor(u_vec)
                 print("rand col index = ", rand_col_idx, u.index_to_desc(rand_col_idx))
-                Ju = cur_state.matvec(u).as_1d_tensor()
+                Ju = cur_state.jvp(u).as_1d_tensor()
                 u_vec[rand_col_idx] = 0
                 rel_error = compute_rel_error(Jtv[rand_col_idx], Ju[rand_row_idx])
                 print(f"fwd {Jtv[rand_col_idx]:.4e} vs J(u)[{rand_row_idx}]: {Ju[rand_row_idx]:.4e}, rel error: {rel_error:.4e}")

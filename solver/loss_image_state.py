@@ -8,17 +8,24 @@ class BatchLossImageState:
     The memory layout is such that the losses of the same type across all images are contiguous.
     """
 
-    def __init__(self, Ll1_per_pixel, ssim_loss_per_pixel, Ll1depth_per_pixel, sizes_list, has_depth):
-        self.Ll1_per_pixel = Ll1_per_pixel
-        self.ssim_loss_per_pixel = ssim_loss_per_pixel
-        self.Ll1depth_per_pixel = Ll1depth_per_pixel
-
-        self.Ll1_scalar = torch.linalg.vector_norm(Ll1_per_pixel.flatten(), ord=2) ** 2
-        self.ssim_loss_scalar = torch.linalg.vector_norm(ssim_loss_per_pixel.flatten(), ord=2) ** 2
-        self.Ll1depth_scalar = torch.linalg.vector_norm(Ll1depth_per_pixel.flatten(), ord=2) ** 2
+    def __init__(self, loss_image, sizes_list, has_depth):
+        """
+        loss_image is a (B, C, H, W) tensor where C is 6 if no depth loss and 7 if depth loss is included.
+        C = 0:2 -> Ll1_per_pixel (3 channels)
+        C = 3:5 -> ssim_loss_per_pixel (3 channels)
+        C = 6   -> Ll1depth_per_pixel (1 channel) or absent if no depth loss
+        H and W are the maximum height and width across the batch.
+        sizes_list is a list of tuples (H_i, W_i) for each image in the batch.
+        has_depth is a boolean indicating if depth loss is included.
+        """
+        self.loss_image = loss_image
+        self.Ll1_per_pixel = loss_image[:, :3, :, :]  # (B, 3, H, W)
+        self.ssim_loss_per_pixel = loss_image[:, 3:6, :, :] # (B, 3, H, W)
+        self.Ll1depth_per_pixel = loss_image[:, 6:, :, :]
+        self.Ll1_scalar = torch.linalg.vector_norm(self.Ll1_per_pixel.flatten(), ord=2) ** 2
+        self.ssim_loss_scalar = torch.linalg.vector_norm(self.ssim_loss_per_pixel.flatten(), ord=2) ** 2
+        self.Ll1depth_scalar = torch.linalg.vector_norm(self.Ll1depth_per_pixel.flatten(), ord=2) ** 2
         self.loss_scalar = self.Ll1_scalar + self.ssim_loss_scalar + self.Ll1depth_scalar
-        assert self.Ll1depth_per_pixel is not None, "Ll1depth_per_pixel must not be None"
-
         self.sizes_list = sizes_list  # List of tuples (H, W) for each image
         self.has_depth = has_depth  # Boolean indicating if depth loss is included
 
@@ -77,56 +84,39 @@ class BatchLossImageState:
             index -= l
 
     def unpack_dual(self):
-        L1_primal, L1_tangent = fwAD.unpack_dual(self.Ll1_per_pixel)
-        ssim_primal, ssim_tangent = fwAD.unpack_dual(self.ssim_loss_per_pixel)
-        Ll1depth_primal, Ll1depth_tangent = fwAD.unpack_dual(self.Ll1depth_per_pixel)
+        loss_image_primal, loss_image_tangent = fwAD.unpack_dual(self.loss_image)
 
-        L1_tangent = L1_tangent if L1_tangent is not None else torch.zeros_like(L1_primal)
-        ssim_tangent = ssim_tangent if ssim_tangent is not None else torch.zeros_like(ssim_primal)
-        Ll1depth_tangent = Ll1depth_tangent if Ll1depth_tangent is not None else torch.zeros_like(Ll1depth_primal)
-
-        primal = BatchLossImageState(L1_primal, ssim_primal, Ll1depth_primal, self.sizes_list, self.has_depth)
-        tangent = BatchLossImageState(L1_tangent, ssim_tangent, Ll1depth_tangent, self.sizes_list, self.has_depth)
+        primal = BatchLossImageState(loss_image_primal, self.sizes_list, self.has_depth)
+        tangent = BatchLossImageState(loss_image_tangent, self.sizes_list, self.has_depth)
 
         return primal, tangent
 
     def backward(self, v, retain_graph=False):
         assert isinstance(v, BatchLossImageState), "v must be an instance of BatchLossImageState"
-        self.Ll1_per_pixel.backward(v.Ll1_per_pixel, retain_graph=retain_graph)
-        self.ssim_loss_per_pixel.backward(v.ssim_loss_per_pixel, retain_graph=retain_graph)
-        self.Ll1depth_per_pixel.backward(v.Ll1depth_per_pixel, retain_graph=retain_graph)
+        self.loss_image.backward(v.loss_image, retain_graph=retain_graph)
 
     def zero_like(self):
         return BatchLossImageState(
-            torch.zeros_like(self.Ll1_per_pixel),
-            torch.zeros_like(self.ssim_loss_per_pixel),
-            torch.zeros_like(self.Ll1depth_per_pixel),
+            torch.zeros_like(self.loss_image),
             self.sizes_list,
-            self.has_depth
-        )
+            self.has_depth)
 
     def __add__(self, other):
         return BatchLossImageState(
-                self.Ll1_per_pixel + other.Ll1_per_pixel,
-                self.ssim_loss_per_pixel + other.ssim_loss_per_pixel,
-                self.Ll1depth_per_pixel + other.Ll1depth_per_pixel,
-                self.sizes_list,
-                self.has_depth)
+            self.loss_image + other.loss_image,
+            self.sizes_list,
+            self.has_depth)
 
     def __sub__(self, other):
         return BatchLossImageState(
-            self.Ll1_per_pixel - other.Ll1_per_pixel,
-            self.ssim_loss_per_pixel - other.ssim_loss_per_pixel,
-            self.Ll1depth_per_pixel - other.Ll1depth_per_pixel,
+            self.loss_image - other.loss_image,
             self.sizes_list,
             self.has_depth)
 
     def __mul__(self, other):
         if isinstance(other, (int, float)):
             return BatchLossImageState(
-                self.Ll1_per_pixel * other,
-                self.ssim_loss_per_pixel * other,
-                self.Ll1depth_per_pixel * other,
+                self.loss_image * other,
                 self.sizes_list,
                 self.has_depth)
         else:
@@ -137,9 +127,7 @@ class BatchLossImageState:
 
     def dot(self, other, damp):
         if isinstance(damp, (int, float)):
-            s = torch.sum(self.Ll1_per_pixel * other.Ll1_per_pixel) + \
-                torch.sum(self.ssim_loss_per_pixel * other.ssim_loss_per_pixel) + \
-                torch.sum(self.Ll1depth_per_pixel * other.Ll1depth_per_pixel)
+            s = torch.sum(self.loss_image * other.loss_image)
             s *= damp
         else:
             raise TypeError("Damping factor must be a scalar")

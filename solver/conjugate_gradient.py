@@ -1,4 +1,5 @@
 import math
+from utils.general_utils import safe_interact
 
 def conjugate_gradient(
     matvec,        # function(x) -> A @ x
@@ -71,16 +72,16 @@ def cg_damped(
         print(f"Restarting CG iteration {iter_total + 1}...") if verbose else None
 
         r = saxpy(-1.0, Ax(x), b)         # r = b - A x
+        res = dot(r, r)
         z = M(r) if M is not None else r  # z = M r
         p = z
 
-        res = dot(r, r)
         print(f"[Iter {iter_total}] res: {res:.2e}")
 
         for k in range(restart_iter):
             gamma = dot(r, z)                       # gamma = <r, z>
             q = Ax(p)                               # q = A p
-            delta = dot(q, q) + dot(p, p)           # delta = <q, q> + λ^2 * <p, p>
+            delta = dot(p, q)                       # delta = <q, p>
             if delta < 1e-15:
                 print("Early termination: delta is too small.")
                 break_flag = True
@@ -88,6 +89,7 @@ def cg_damped(
             alpha = gamma / delta
             x = saxpy(alpha, p, x)                  # x = x + alpha * p
             r = saxpy(-alpha, q, r)                 # r = r - alpha * q
+            res = dot(r, r)
             z = M(r) if M is not None else r        # z = M r
             gamma_prev = gamma
             gamma = dot(r, z)                       # Update gamma
@@ -95,8 +97,9 @@ def cg_damped(
             p = saxpy(beta, p, z)                   # p = z + beta * p
 
             # if verbose:
-            res = dot(r, r)
-            print(f"[Iter {iter_total+1}] res: {res:.2e}")
+            x_norm = math.sqrt(dot(x, x))
+            print(f"[Iter {iter_total+1}] res: {res:.2e}, |x|: {x_norm:.2e}")
+            # safe_interact(local=locals(), banner="Debugging CG")
 
             iter_total += 1
             if iter_total >= max_iter:
@@ -105,6 +108,10 @@ def cg_damped(
 
         if break_flag:
             break
+
+    r = saxpy(-1.0, Ax(x), b)         # r = b - A x
+    res = dot(r, r)
+    print(f"Final residual norm: {res:.2e}")
 
     return x
 

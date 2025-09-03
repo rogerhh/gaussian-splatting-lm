@@ -24,6 +24,30 @@ class GaussianModelDampMatrix:
                                        -self.opacity_damp,
                                        -self.exposure_damp)
 
+    def __add__(self, other):
+        if isinstance(other, (int, float)):
+            return GaussianModelDampMatrix(self.xyz_damp + other,
+                                           self.features_dc_damp + other,
+                                           self.features_rest_damp + other,
+                                           self.scaling_damp + other,
+                                           self.rotation_damp + other,
+                                           self.opacity_damp + other,
+                                           self.exposure_damp + other)
+
+    def __mul__(self, other):
+        if isinstance(other, (int, float)):
+            return GaussianModelDampMatrix(self.xyz_damp * other,
+                                           self.features_dc_damp * other,
+                                           self.features_rest_damp * other,
+                                           self.scaling_damp * other,
+                                           self.rotation_damp * other,
+                                           self.opacity_damp * other,
+                                           self.exposure_damp * other)
+        if isinstance(other, GaussianModelState):
+            return other * self
+        else:
+            raise TypeError(f"Can only multiply by scalar values, not {type(other)}")
+
 class GaussianModelParamGroupMask:
     """
     Per parameter mask
@@ -78,16 +102,15 @@ class GaussianModelState:
             if param_mask.mask_exposure:
                 self.exposure_grad.zero_()
         if splat_mask is not None:
-            self.xyz_grad[splat_mask.mask_out_filter] = 0
-            self.features_dc_grad[splat_mask.mask_out_filter] = 0
-            self.features_rest_grad[splat_mask.mask_out_filter] = 0
-            self.scaling_grad[splat_mask.mask_out_filter] = 0
-            self.rotation_grad[splat_mask.mask_out_filter] = 0
-            self.opacity_grad[splat_mask.mask_out_filter] = 0
-            self.exposure_grad[splat_mask.mask_out_filter] = 0
+            self.xyz_grad[splat_mask.mask_out_filter] = 0.0
+            self.features_dc_grad[splat_mask.mask_out_filter] = 0.0
+            self.features_rest_grad[splat_mask.mask_out_filter] = 0.0
+            self.scaling_grad[splat_mask.mask_out_filter] = 0.0
+            self.rotation_grad[splat_mask.mask_out_filter] = 0.0
+            self.opacity_grad[splat_mask.mask_out_filter] = 0.0
 
     @classmethod
-    def from_gaussians(cls, gaussians, param_mask=None, splat_mask=None):
+    def zero_like_gaussians(cls, gaussians, param_mask=None, splat_mask=None):
         return cls(torch.zeros_like(gaussians._xyz),
                    torch.zeros_like(gaussians._features_dc),
                    torch.zeros_like(gaussians._features_rest),
@@ -97,6 +120,21 @@ class GaussianModelState:
                    torch.zeros_like(gaussians._exposure),
                    param_mask=param_mask,
                    splat_mask=splat_mask)
+
+    @classmethod
+    def rademacher_like_gaussians(cls, gaussians, param_mask=None, splat_mask=None):
+        def rademacher_like(T):
+            return (2 * torch.randint(0, 2, T.shape, device=T.device, dtype=torch.int8) - 1).to(T.dtype)
+        return cls(rademacher_like(gaussians._xyz),
+                   rademacher_like(gaussians._features_dc),
+                   rademacher_like(gaussians._features_rest),
+                   rademacher_like(gaussians._scaling),
+                   rademacher_like(gaussians._rotation),
+                   rademacher_like(gaussians._opacity),
+                   rademacher_like(gaussians._exposure),
+                   param_mask=param_mask,
+                   splat_mask=splat_mask)
+
 
     @classmethod
     def from_gaussians_grad(cls, gaussians, param_mask=None, splat_mask=None):
@@ -116,6 +154,34 @@ class GaussianModelState:
                    exposure_grad,
                    param_mask=param_mask,
                    splat_mask=splat_mask)
+
+    def clip(self):
+        feat_dc_grad_norm = self.features_dc_grad.norm()
+        feat_dc_grad_norm_max = self.features_dc_grad.norm(dim=-1).max()
+        feat_dc_grad_max = self.features_dc_grad.abs().max()
+        measured_norm = feat_dc_grad_norm
+        target_norm = min(measured_norm, 8.0)
+        print(f"Max per-gaussian features_dc grad norm: {feat_dc_grad_norm:.4e}")
+        print(f"Max per-gaussian features_dc grad norm: {feat_dc_grad_norm_max:.4e}")
+        print(f"Max per-gaussian features_dc grad abs: {feat_dc_grad_max:.4e}")
+        print(f"Clipping ratio: {target_norm / measured_norm:.4e}")
+        self.xyz_grad *= target_norm / measured_norm
+        self.features_dc_grad *= target_norm / measured_norm
+        self.features_rest_grad *= target_norm / measured_norm
+        self.scaling_grad *= target_norm / measured_norm
+        self.rotation_grad *= target_norm / measured_norm
+        self.opacity_grad *= target_norm / measured_norm
+        self.exposure_grad *= target_norm / measured_norm
+
+    def block_average_and_expand(self):
+        self.xyz_grad = self.xyz_grad.mean(dim=-1, keepdim=True).expand_as(self.xyz_grad)
+        self.features_dc_grad = self.features_dc_grad.mean(dim=-1, keepdim=True).expand_as(self.features_dc_grad)
+        self.features_rest_grad = self.features_rest_grad.mean(dim=-1, keepdim=True).expand_as(self.features_rest_grad)
+        self.scaling_grad = self.scaling_grad.mean(dim=-1, keepdim=True).expand_as(self.scaling_grad)
+        self.rotation_grad = self.rotation_grad.mean(dim=-1, keepdim=True).expand_as(self.rotation_grad)
+        self.opacity_grad = self.opacity_grad.mean(dim=-1, keepdim=True).expand_as(self.opacity_grad)
+        self.exposure_grad = self.exposure_grad.mean(dim=-1, keepdim=True).expand_as(self.exposure_grad)
+
 
     @property
     def length(self):
@@ -199,28 +265,64 @@ class GaussianModelState:
                 return name, find_coord(offset, getattr(self, name).shape)
             index -= l
 
+    def __neg__(self):
+        return GaussianModelState(
+            -self.xyz_grad,
+            -self.features_dc_grad,
+            -self.features_rest_grad,
+            -self.scaling_grad,
+            -self.rotation_grad,
+            -self.opacity_grad,
+            -self.exposure_grad
+        )
 
     def __add__(self, other):
-        return GaussianModelState(
-            self.xyz_grad + other.xyz_grad,
-            self.features_dc_grad + other.features_dc_grad,
-            self.features_rest_grad + other.features_rest_grad,
-            self.scaling_grad + other.scaling_grad,
-            self.rotation_grad + other.rotation_grad,
-            self.opacity_grad + other.opacity_grad,
-            self.exposure_grad + other.exposure_grad
-        )
+        if isinstance(other, (int, float)):
+            return GaussianModelState(
+                self.xyz_grad + other,
+                self.features_dc_grad + other,
+                self.features_rest_grad + other,
+                self.scaling_grad + other,
+                self.rotation_grad + other,
+                self.opacity_grad + other,
+                self.exposure_grad + other
+            )
+        elif isinstance(other, GaussianModelState):
+            return GaussianModelState(
+                self.xyz_grad + other.xyz_grad,
+                self.features_dc_grad + other.features_dc_grad,
+                self.features_rest_grad + other.features_rest_grad,
+                self.scaling_grad + other.scaling_grad,
+                self.rotation_grad + other.rotation_grad,
+                self.opacity_grad + other.opacity_grad,
+                self.exposure_grad + other.exposure_grad
+            )
+        else:
+            raise TypeError(f"Can only add scalar values or GaussianModelState, not {type(other)}")
 
     def __sub__(self, other):
-        return GaussianModelState(
-            self.xyz_grad - other.xyz_grad,
-            self.features_dc_grad - other.features_dc_grad,
-            self.features_rest_grad - other.features_rest_grad,
-            self.scaling_grad - other.scaling_grad,
-            self.rotation_grad - other.rotation_grad,
-            self.opacity_grad - other.opacity_grad,
-            self.exposure_grad - other.exposure_grad
-        )
+        if isinstance(other, (int, float)):
+            return GaussianModelState(
+                self.xyz_grad - other,
+                self.features_dc_grad - other,
+                self.features_rest_grad - other,
+                self.scaling_grad - other,
+                self.rotation_grad - other,
+                self.opacity_grad - other,
+                self.exposure_grad - other
+            )
+        elif isinstance(other, GaussianModelState):
+            return GaussianModelState(
+                self.xyz_grad - other.xyz_grad,
+                self.features_dc_grad - other.features_dc_grad,
+                self.features_rest_grad - other.features_rest_grad,
+                self.scaling_grad - other.scaling_grad,
+                self.rotation_grad - other.rotation_grad,
+                self.opacity_grad - other.opacity_grad,
+                self.exposure_grad - other.exposure_grad
+            )
+        else:
+            raise TypeError(f"Can only subtract scalar values or GaussianModelState, not {type(other)}")
 
     def __mul__(self, other):
         if isinstance(other, (int, float)):
@@ -233,7 +335,17 @@ class GaussianModelState:
                 self.opacity_grad * other,
                 self.exposure_grad * other
             )
-        if isinstance(other, GaussianModelDampMatrix):
+        elif isinstance(other, GaussianModelState):
+            return GaussianModelState(
+                self.xyz_grad * other.xyz_grad,
+                self.features_dc_grad * other.features_dc_grad,
+                self.features_rest_grad * other.features_rest_grad,
+                self.scaling_grad * other.scaling_grad,
+                self.rotation_grad * other.rotation_grad,
+                self.opacity_grad * other.opacity_grad,
+                self.exposure_grad * other.exposure_grad
+            )
+        elif isinstance(other, GaussianModelDampMatrix):
             return GaussianModelState(
                 self.xyz_grad * other.xyz_damp,
                 self.features_dc_grad * other.features_dc_damp,
@@ -248,6 +360,30 @@ class GaussianModelState:
 
     def __rmul__(self, other):
         return self.__mul__(other)
+
+    def __truediv__(self, other):
+        if isinstance(other, (int, float)):
+            return GaussianModelState(
+                self.xyz_grad / other,
+                self.features_dc_grad / other,
+                self.features_rest_grad / other,
+                self.scaling_grad / other,
+                self.rotation_grad / other,
+                self.opacity_grad / other,
+                self.exposure_grad / other
+            )
+        if isinstance(other, GaussianModelState):
+            return GaussianModelState(
+                self.xyz_grad / other.xyz_grad,
+                self.features_dc_grad / other.features_dc_grad,
+                self.features_rest_grad / other.features_rest_grad,
+                self.scaling_grad / other.scaling_grad,
+                self.rotation_grad / other.rotation_grad,
+                self.opacity_grad / other.opacity_grad,
+                self.exposure_grad / other.exposure_grad
+            )
+        else:
+            raise TypeError(f"Can only divide by scalar values, not {type(other)}")
 
     def dot(self, other, damp):
         if isinstance(damp, (int, float)):
@@ -271,4 +407,15 @@ class GaussianModelState:
             raise TypeError(f"damp must be a scalar or GaussianModelDampMatrix, not {type(damp)}")
 
         return s.item()
+
+    def sqrt(self):
+        return GaussianModelState(
+            torch.sqrt(self.xyz_grad),
+            torch.sqrt(self.features_dc_grad),
+            torch.sqrt(self.features_rest_grad),
+            torch.sqrt(self.scaling_grad),
+            torch.sqrt(self.rotation_grad),
+            torch.sqrt(self.opacity_grad),
+            torch.sqrt(self.exposure_grad)
+        )
      

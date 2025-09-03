@@ -70,9 +70,9 @@ def training(dataset, opt, pipe, checkpoint, num_images):
 
     loss_func = partial(batch_training_loss, iteration=iteration, opt=opt, pipe=pipe, bg=bg, train_test_exp=dataset.train_test_exp, depth_l1_weight=depth_l1_weight, disable_ssim=True)
 
-    cur_state = LinearSolverFunctions(loss_func, gaussians, viewpoint_cams, batch_size=50)
+    cur_state = LinearSolverFunctions(loss_func, gaussians, viewpoint_cams, batch_size=20)
 
-    u = GaussianModelState.from_gaussians(gaussians)
+    u = GaussianModelState.zero_like_gaussians(gaussians)
 
     NUM_ITERATIONS = 5
 
@@ -80,20 +80,26 @@ def training(dataset, opt, pipe, checkpoint, num_images):
     for _ in range(NUM_ITERATIONS):
         cur_state.evaluate_loss()
 
-    matvec_start = time.time()
+    jvp_start = time.time()
     for i in range(NUM_ITERATIONS):
         print(f"Matvec iteration {i+1}/{NUM_ITERATIONS}")
-        Ju = cur_state.matvec(u)
-    matvec_end = time.time()
+        Ju = cur_state.jvp(u)
+    jvp_end = time.time()
 
     loss = cur_state.evaluate_loss()
     v = loss.zero_like()
 
-    vecmat_start = time.time()
+    vjp_start = time.time()
     for i in range(NUM_ITERATIONS):
         print(f"VecMat iteration {i+1}/{NUM_ITERATIONS}")
-        JTv = cur_state.matvec_T(v)
-    vecmat_end = time.time()
+        JTv = cur_state.vjp(v)
+    vjp_end = time.time()
+
+    Hv_start = time.time()
+    for i in range(NUM_ITERATIONS):
+        print(f"Hv iteration {i+1}/{NUM_ITERATIONS}")
+        cur_state.Hv(u)
+    Hv_end = time.time()
 
     forward_start = time.time()
     for i in range(NUM_ITERATIONS):
@@ -101,8 +107,9 @@ def training(dataset, opt, pipe, checkpoint, num_images):
         cur_state.evaluate_loss()
     forward_end = time.time()
 
-    print(f"Matvec time: {(matvec_end - matvec_start) * 1000 / NUM_ITERATIONS:.6f} milliseconds per iteration")
-    print(f"VecMat time: {(vecmat_end - vecmat_start) * 1000 / NUM_ITERATIONS:.6f} milliseconds per iteration")
+    print(f"Matvec time: {(jvp_end - jvp_start) * 1000 / NUM_ITERATIONS:.6f} milliseconds per iteration")
+    print(f"VecMat time: {(vjp_end - vjp_start) * 1000 / NUM_ITERATIONS:.6f} milliseconds per iteration")
+    print(f"Hv time: {(Hv_end - Hv_start) * 1000 / NUM_ITERATIONS:.6f} milliseconds per iteration")
     print(f"Forward time: {(forward_end - forward_start) * 1000 / NUM_ITERATIONS:.6f} milliseconds per iteration")
 
     print("rand_indices:", rand_indices)

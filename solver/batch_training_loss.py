@@ -15,6 +15,8 @@ def compute_batch_loss_block(images, alpha_masks, gt_images, per_image_alphas, p
     if disable_ssim:
         Ll1_per_pixel = (images - gt_images)
         ssim_loss_per_pixel = Ll1_per_pixel
+        Ll1_per_pixel = per_image_alphas * Ll1_per_pixel
+        ssim_loss_per_pixel = per_image_betas * ssim_loss_per_pixel
     else:
         Ll1_per_pixel = l1_loss_per_pixel(images, gt_images)
         if FUSED_SSIM_AVAILABLE:
@@ -97,10 +99,9 @@ def batch_training_loss(iteration, opt, viewpoint_cams, gaussians, pipe, bg, tra
         raise NotImplementedError("Ll1depth_pure_per_pixel is not implemented in this version.")
 
     else:
-        Ll1depth = 0
-        Ll1depth_per_pixel = torch.zeros((0,), dtype=Ll1_per_pixel.dtype, device=Ll1_per_pixel.device, requires_grad=True)
+        loss_image = torch.cat((Ll1_per_pixel, ssim_loss_per_pixel), dim=1)
 
-    loss_image_state = BatchLossImageState(Ll1_per_pixel, ssim_loss_per_pixel, Ll1depth_per_pixel, sizes_list, has_depth)
+    loss_image_state = BatchLossImageState(loss_image, sizes_list, has_depth)
 
     return loss_image_state
 

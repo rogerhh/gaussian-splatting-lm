@@ -136,11 +136,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             viewpoint_indices = list(range(len(viewpoint_stack)))
 
         num_batch_cameras = min(num_images, len(viewpoint_indices))
-        # rand_indices = np.random.choice(viewpoint_indices, num_batch_cameras, replace=False)
+        rand_indices = np.random.choice(viewpoint_indices, num_batch_cameras, replace=False)
 
-        stride = np.random.randint(1, 4)
-        rand_index_start = np.random.randint(0, len(viewpoint_indices) - num_batch_cameras * stride)
-        rand_indices = list(range(rand_index_start, rand_index_start + num_batch_cameras * stride, stride))
+        # stride = np.random.randint(1, 4)
+        # rand_index_start = np.random.randint(0, len(viewpoint_indices) - num_batch_cameras * stride)
+        # rand_indices = list(range(rand_index_start, rand_index_start + num_batch_cameras * stride, stride))
 
         # Same background for all cameras in the batch
         bg = torch.rand((3), device="cuda") if opt.random_background else background
