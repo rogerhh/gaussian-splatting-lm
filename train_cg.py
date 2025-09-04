@@ -32,7 +32,7 @@ from solver.gaussian_model_state import GaussianModelState, GaussianModelDampMat
 from solver.batch_training_loss import batch_training_loss
 from solver.solver_functions import LinearSolverFunctions
 from solver.conjugate_gradient import cg_damped, cgls_damped
-from solver.ada_hessian_optimizer import AdaHessianOptimizer
+from solver.preconditioner import AdaHessianPreconditioner
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -95,6 +95,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     viewpoint_stack = scene.getTrainCameras().copy()
     viewpoint_indices = list(range(len(viewpoint_stack)))
+    val_indices = [i for i in range(0, len(viewpoint_stack), 20)]
+    val_cameras = [viewpoint_stack[i] for i in val_indices]
+    train_indices = [i for i in range(len(viewpoint_stack)) if i not in val_indices]
+    train_cameras = [viewpoint_stack[i] for i in train_indices]
+
+    del val_indices, train_indices
+
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
 
@@ -111,26 +118,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     P = gaussians.get_xyz.shape[0]
 
-    damp = GaussianModelDampMatrix(xyz_damp=5e-4, 
-                                   features_dc_damp=5e-5, 
-                                   features_rest_damp=5e-4, 
-                                   scaling_damp=5e-5, 
-                                   rotation_damp=5e-5, 
-                                   opacity_damp=5e-5, 
-                                   exposure_damp=1e1)
-
-    lr = GaussianModelDampMatrix(xyz_damp=1e-2, 
-                                   features_dc_damp=2.5e-1, 
-                                   features_rest_damp=1e-2, 
+    damp = GaussianModelDampMatrix(xyz_damp=5e-2, 
+                                   features_dc_damp=5e-2, 
+                                   features_rest_damp=5e-2, 
                                    scaling_damp=5e-2, 
-                                   rotation_damp=1e-2, 
-                                   opacity_damp=2.5e-2, 
-                                   exposure_damp=1e1)
+                                   rotation_damp=5e-2, 
+                                   opacity_damp=5e-2, 
+                                   exposure_damp=1e1) * 1
 
-    loss_func = partial(batch_training_loss, iteration=jvp_start, opt=opt, pipe=pipe, bg=background, train_test_exp=dataset.train_test_exp, depth_l1_weight=depth_l1_weight, disable_ssim=True)
+    loss_func = partial(batch_training_loss, iteration=jvp_start, opt=opt, pipe=pipe, bg=background, train_test_exp=dataset.train_test_exp, depth_l1_weight=depth_l1_weight, disable_ssim=False)
     solver_functions = LinearSolverFunctions(loss_func, gaussians, param_mask=param_mask, damp=damp, splat_mask=None)
     rademacher_gen = partial(GaussianModelState.rademacher_like_gaussians, gaussians)
-    optimizer = AdaHessianOptimizer(rademacher_gen, beta1=0.9, beta2=0.99, eps=1e-8)
+    preconditioner = AdaHessianPreconditioner(rademacher_gen, beta2=0.999, eps=1e-8, hessian_power=1.0)
+    pcg_max_iter = 10
 
     for iteration in range(first_iter, opt.iterations + 1):
         if network_gui.conn == None:
@@ -216,65 +216,66 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Every 1000 its we increase the levels of SH up to a maximum degree
             if iteration % 10 == 0:
-                lr.xyz_damp *= 0.999
                 gaussians.oneupSHdegree()
+                pcg_max_iter += 5
 
-            # Pick a random Camera
-            if not viewpoint_stack:
-                viewpoint_stack = scene.getTrainCameras().copy()
-                viewpoint_indices = list(range(len(viewpoint_stack)))
+            num_batch_cameras = min(num_images, len(train_cameras))
+            rand_indices = np.random.choice(len(train_cameras), num_batch_cameras, replace=False)
 
-            num_batch_cameras = min(num_images, len(viewpoint_indices))
-            # rand_indices = np.random.choice(viewpoint_indices, num_batch_cameras, replace=False)
-
-            stride = np.random.randint(1, 2)
-            rand_index_start = np.random.randint(0, len(viewpoint_indices) - num_batch_cameras * stride)
-            rand_indices = list(range(rand_index_start, rand_index_start + num_batch_cameras * stride, stride))
+            # stride = np.random.randint(1, 3)
+            # rand_index_start = np.random.randint(0, len(train_cameras) - num_batch_cameras * stride)
+            # rand_indices = list(range(rand_index_start, rand_index_start + num_batch_cameras * stride, stride))
 
             print(f"\n[ITER {iteration}] Using {num_batch_cameras} random cameras: {rand_indices}")
             # Same background for all cameras in the batch
             bg = torch.rand((3), device="cuda") if opt.random_background else background
-            viewpoint_cams = []
-            for rand_idx in rand_indices:
-                viewpoint_cam = viewpoint_stack[rand_idx]
-                viewpoint_cams.append(viewpoint_cam)
+            viewpoint_cams = [train_cameras[idx] for idx in rand_indices]
 
             # Render
             if (iteration - 1) == debug_from:
                 pipe.debug = True
 
-            val_indices = [(idx * 19) % len(scene.getTrainCameras()) for idx in range(0, 50)]
-            # val_indices = rand_indices
-            val_viewpoint_cams = [viewpoint_stack[idx] for idx in val_indices]
+            if iteration == jvp_start:
+                preconditioner.reset()
+                preconditioner.update(partial(solver_functions.Hv, viewpoint_cams=viewpoint_cams, batch_size=5), max_iter=5)
+            else:
+                preconditioner.update(partial(solver_functions.Hv, viewpoint_cams=viewpoint_cams, batch_size=5), max_iter=1)
 
-            class CamProvider:
-                def __init__(self, viewpoint_cams, batch_size=1):
-                    self.viewpoint_cams = viewpoint_cams
-                    self.B = len(viewpoint_cams)
-                    self.batch_size = batch_size
-                    self.start_idx = np.random.randint(0, self.B - 1)
+            Hx = partial(solver_functions.Hv, viewpoint_cams=viewpoint_cams, batch_size=5)
+            start_loss, g = solver_functions.initial_evaluation(viewpoint_cams, batch_size=5)
+            x0 = solver_functions.get_initial_solution()
 
-                def __next__(self):
-                    vcs = []
-                    indices = []
-                    for _ in range(self.batch_size):
-                        vc = self.viewpoint_cams[self.start_idx]
-                        vcs.append(vc)
-                        indices.append(self.start_idx)
-                        step = np.random.randint(1, 8)
-                        self.start_idx = (self.start_idx + step) % self.B
+            s = cg_damped(Ax=Hx,
+                          dot=solver_functions.dot,
+                          saxpy=solver_functions.saxpy,
+                          b=-g,
+                          x0=x0,
+                          M=preconditioner,
+                          max_iter=pcg_max_iter,
+                          restart_iter=5)
 
-                    print("    CamProvider returning indices: ", indices)
+            # Line search
+            alpha = 1.0
+            cur_alpha = 0.0
+            best_alpha = 0.0
+            best_loss = solver_functions.evaluate_loss(val_cameras, batch_size=20)[1].item()
+            print(f"[ITER {iteration}] Line search start: alpha {cur_alpha}, loss {best_loss:.6f}")
+            for ls_iter in range(9):
+                gaussians.update_step(s * (alpha - cur_alpha))
+                cur_alpha = alpha
+                loss_scalar = solver_functions.evaluate_loss(val_cameras, batch_size=20)[1].item()
 
-                    return vcs
+                print(f"[ITER {iteration}] Line search iter {ls_iter}: alpha {cur_alpha}, loss {loss_scalar:.6f}")
 
-            # preconditioner.reset()
-            optimizer_iter = 1 if iteration == jvp_start else num_images
-            s = optimizer.get_update_step(partial(solver_functions.rand_batch_Hv_and_gradient, 
-                                                  cam_provider=CamProvider(viewpoint_stack, 100), batch_size=5),
-                                          max_iter=optimizer_iter)
+                if loss_scalar < best_loss:
+                    best_loss = loss_scalar
+                    best_alpha = cur_alpha
 
-            s = s * (-lr)
+                alpha *= 0.5
+
+            gaussians.update_step(s * (best_alpha - cur_alpha))
+            best_loss = solver_functions.evaluate_loss(val_cameras, batch_size=20)[1].item()
+            print(f"[ITER {iteration}] alpha = {best_alpha}, loss = {best_loss}")
 
             xyz_grad_norm = s.xyz_grad.norm().item()
             features_dc_grad_norm = s.features_dc_grad.norm().item()
@@ -284,10 +285,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             opacity_grad_norm = s.opacity_grad.norm().item()
             exposure_grad_norm = s.exposure_grad.norm().item()
 
-            print(f"[ITER {iteration}] Optimization step with {optimizer_iter} iterations")
+            print(f"[ITER {iteration}]")
             print(f"    Gradient norms: xyz {xyz_grad_norm:.4e}, features_dc {features_dc_grad_norm:.4e}, features_rest {features_rest_grad_norm:.4e}, scaling {scaling_grad_norm:.4e}, rotation {rotation_grad_norm:.4e}, opacity {opacity_grad_norm:.4e}, exposure {exposure_grad_norm:.4e}")
-
-            gaussians.update_step(s)
             
 
 

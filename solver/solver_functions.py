@@ -3,7 +3,10 @@ import torch
 import torch.autograd.forward_ad as fwAD
 from solver.gaussian_model_state import GaussianModelState, GaussianModelParamGroupMask, GaussianModelSplatMask
 from solver.loss_image_state import MultiBatchLossImageState
+from solver.solver_utils import CamProvider
+from utils.general_utils import safe_interact, print_gpu_objects_unique
 import time
+import gc
 
 def print_backwards_graph(gfn, indent=0):
     print(" " * indent, gfn)
@@ -15,9 +18,10 @@ def print_backwards_graph(gfn, indent=0):
 
 class LinearSolverFunctions:
 
-    def __init__(self, loss_func, gaussians, batch_size=-1, param_mask=None, splat_mask=None, damp=None):
+    def __init__(self, loss_func, gaussians, viewpoint_cams, batch_size=-1, param_mask=None, splat_mask=None, damp=None):
         self.loss_func = loss_func
         self.gaussians = gaussians
+        self.viewpoint_cams = viewpoint_cams
         self.batch_stats = {}
         self.param_mask = param_mask
         self.splat_mask = splat_mask
@@ -28,20 +32,21 @@ class LinearSolverFunctions:
         self.Ll1depth_scalar = None
 
 
+
     def get_initial_solution(self):
         s0 = GaussianModelState.zero_like_gaussians(self.gaussians, param_mask=self.param_mask, splat_mask=self.splat_mask)
         return s0
 
-    def evaluate_loss(self, viewpoint_cams, batch_size=-1, with_batch_stats=False, with_grad=False):
+    def evaluate_loss(self, viewpoint_cams, batch_size=-1, with_batch_stats=False, with_grad=False, with_loss_image=False):
         """
         Evaluate the loss functions on the current Gaussian model state.
         """
         batch_stats = {} if with_batch_stats else None
         B = len(viewpoint_cams)
         batch_size = batch_size if batch_size > 0 else B
-        with torch.enable_grad() if with_grad else torch.no_grad():
+        for start_idx in range(0, B, batch_size):
             losses = []
-            for start_idx in range(0, B, batch_size):
+            with torch.enable_grad() if with_grad else torch.no_grad():
                 end_idx = min(start_idx + batch_size, B)
                 viewpoint_cams_batch = [viewpoint_cams[i] for i in range(start_idx, end_idx)]
                 loss = self.loss_func(gaussians=self.gaussians, viewpoint_cams=viewpoint_cams_batch, batch_stats=batch_stats)
@@ -60,7 +65,13 @@ class LinearSolverFunctions:
             self.Ll1depth_scalar = loss.Ll1depth_scalar
             self.loss_scalar = loss.loss_scalar
 
-        return loss
+        if not with_loss_image:
+            del loss
+            gc.collect()
+            torch.cuda.empty_cache()
+            return self.loss_scalar, self.Ll1_scalar, self.Ll1depth_scalar
+        else:
+            return loss
 
     @property
     def get_batch_stats(self):
@@ -70,15 +81,15 @@ class LinearSolverFunctions:
         return self.batch_stats
 
     def jvp(self, v, viewpoint_cams, batch_size=-1):
-        raise NotImplementedError("not working with damp")
+        assert self.damp is None, "damp not supported in jvp currently"
 
         assert isinstance(v, GaussianModelState), "v must be an instance of GaussianModelState"
         B = len(viewpoint_cams)
         batch_size = batch_size if batch_size > 0 else B
 
-        with torch.no_grad(), fwAD.dual_level(), self.gaussians.make_dual(v):
+        for start_idx in range(0, B, batch_size):
             loss_tangents = []
-            for start_idx in range(0, B, batch_size):
+            with torch.no_grad(), fwAD.dual_level(), self.gaussians.make_dual(v):
                 end_idx = min(start_idx + batch_size, B)
                 viewpoint_cams_batch = [viewpoint_cams[i] for i in range(start_idx, end_idx)]
                 loss_dual = self.loss_func(gaussians=self.gaussians, viewpoint_cams=viewpoint_cams_batch)
@@ -92,19 +103,19 @@ class LinearSolverFunctions:
             return loss_tangents
 
     def vjp(self, vs, viewpoint_cams, batch_size=-1):
-        raise NotImplementedError("not working with damp")
+        assert self.damp is None, "damp not supported in jvp currently"
 
         # Assume vs is a MultiBatchLossImageState with the same batch size and order as the original viewpoint_cams
         assert isinstance(vs, MultiBatchLossImageState), "vs must be an instance of MultiBatchLossImageState"
         B = len(viewpoint_cams)
         batch_size = batch_size if batch_size > 0 else B
 
-        with torch.enable_grad():
+        for start_idx in range(0, B, batch_size):
             self.gaussians.zero_grad()
 
             idx = 0
 
-            for start_idx in range(0, B, batch_size):
+            with torch.enable_grad():
                 end_idx = min(start_idx + batch_size, B)
                 vs_batch = vs.batch_losses[idx]
 
@@ -128,11 +139,11 @@ class LinearSolverFunctions:
 
         return GaussianModelState.from_gaussians_grad(self.gaussians, param_mask=self.param_mask, splat_mask=self.splat_mask)
 
-    def initial_evalulation(self, viewpoint_cams, batch_size=-1):
+    def initial_evaluation(self, viewpoint_cams, batch_size=-1):
         """
         Run one forward pass to get loss value and one backward pass to get initial gradient.
         """
-        grad = self.gradient(viewpoint_cams, batch_size=-1)
+        grad = self.gradient(viewpoint_cams, batch_size=batch_size)
         return self.loss_scalar, grad
 
     def gradient(self, viewpoint_cams, batch_size=-1):
@@ -153,8 +164,8 @@ class LinearSolverFunctions:
         B = len(viewpoint_cams)
         batch_size = batch_size if batch_size > 0 else B
 
-        with torch.enable_grad(), fwAD.dual_level(), self.gaussians.make_dual(v):
-            for start_idx in range(0, B, batch_size):
+        for start_idx in range(0, B, batch_size):
+            with torch.enable_grad(), fwAD.dual_level(), self.gaussians.make_dual(v):
                 end_idx = min(start_idx + batch_size, B)
                 viewpoint_cams_batch = [viewpoint_cams[i] for i in range(start_idx, end_idx)]
                 loss_dual = self.loss_func(gaussians=self.gaussians, viewpoint_cams=viewpoint_cams_batch)
@@ -162,10 +173,16 @@ class LinearSolverFunctions:
                 loss_primal.backward(loss_tangent, retain_graph=False)
 
                 del loss_primal, loss_dual, loss_tangent
+                gc.collect()
+                torch.cuda.empty_cache()
 
-        Hv = (self.damp + 1) * GaussianModelState.from_gaussians_grad(self.gaussians, param_mask=self.param_mask, splat_mask=self.splat_mask)
+        Hv = GaussianModelState.from_gaussians_grad(self.gaussians, param_mask=self.param_mask, splat_mask=self.splat_mask)
+        if self.damp is not None:
+            Hv += self.damp * v
+
 
         return Hv
+
 
     def rand_batch_Hv_and_gradient(self, v, cam_provider, batch_size=-1):
         """
