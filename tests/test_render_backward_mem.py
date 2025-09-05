@@ -232,7 +232,7 @@ def print_gpu_objects_unique():
     # Print results
     total_tensor_mem = 0
     for size_mb, typ, shape, dtype, device, tid in unique_tensors:
-        print(f"{typ.__name__:<20} {shape} {dtype} {device} {size_mb:.2f} MB, id: {tid}")
+        # print(f"{typ.__name__:<20} {shape} {dtype} {device} {size_mb:.2f} MB, id: {tid}")
         total_tensor_mem += size_mb
 
         if shape not in shapes_dict:

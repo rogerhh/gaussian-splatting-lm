@@ -18,6 +18,7 @@ class BatchLossImageState:
         sizes_list is a list of tuples (H_i, W_i) for each image in the batch.
         has_depth is a boolean indicating if depth loss is included.
         """
+        self.has_loss_image = True
         self.loss_image = loss_image
         self.Ll1_per_pixel = loss_image[:, :3, :, :]  # (B, 3, H, W)
         self.ssim_loss_per_pixel = loss_image[:, 3:6, :, :] # (B, 3, H, W)
@@ -28,6 +29,20 @@ class BatchLossImageState:
         self.loss_scalar = self.Ll1_scalar + self.ssim_loss_scalar + self.Ll1depth_scalar
         self.sizes_list = sizes_list  # List of tuples (H, W) for each image
         self.has_depth = has_depth  # Boolean indicating if depth loss is included
+
+    def remove_loss_image(self):
+        """
+        Remove loss image to save memory
+        TODO: make this cleaner
+        """
+        self.has_loss_image = False
+        B, C, H, W = self.loss_image.shape
+        self.loss_image = torch.empty((0, C, H, W), device=self.loss_image.device)
+        self.Ll1_per_pixel = self.loss_image[:, :3, :, :]
+        self.ssim_loss_per_pixel = self.loss_image[:, 3:6, :, :]
+        self.Ll1depth_per_pixel = self.loss_image[:, 6:, :, :]
+
+        torch.cuda.empty_cache()
 
     def check_invariant(self):
         Ll1_clone = self.Ll1_per_pixel.clone()

@@ -142,3 +142,43 @@ def safe_state(silent):
     np.random.seed(0)
     torch.manual_seed(0)
     torch.cuda.set_device(torch.device("cuda:0"))
+
+def print_gpu_objects_unique():
+    import gc
+    seen_ids = set()
+    unique_tensors = []
+
+    for obj in gc.get_objects():
+        try:
+            # Check if object is a tensor
+            if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+                t = obj if torch.is_tensor(obj) else obj.data
+                tensor_id = id(t)
+                if tensor_id not in seen_ids:
+                    seen_ids.add(tensor_id)
+                    size_mb = t.numel() * t.element_size() / 1024**2
+                    unique_tensors.append((size_mb, type(t), tuple(t.size()), t.dtype, t.device, tensor_id))
+        except Exception:
+            pass
+
+    # Sort by memory usage (descending)
+    unique_tensors.sort(key=lambda x: x[0], reverse=True)
+    shapes_dict = {}
+
+    # Print results
+    total_tensor_mem = 0
+    for size_mb, typ, shape, dtype, device, tid in unique_tensors:
+        # print(f"{typ.__name__:<20} {shape} {dtype} {device} {size_mb:.2f} MB, id: {tid}")
+        total_tensor_mem += size_mb
+
+        if shape not in shapes_dict:
+            shapes_dict[shape] = 0.0
+        shapes_dict[shape] += size_mb
+
+    print(f"Shapes summary (unique shapes):")
+    for shape, size_mb in shapes_dict.items():
+        print(f"  {shape}: {size_mb:.2f} MB")
+
+    print(f"\nTotal unique CUDA tensor memory (approx.): {total_tensor_mem:.2f} MB")
+    print(f"PyTorch allocated memory: {torch.cuda.memory_allocated()/1024**2:.2f} MB")
+    print(f"PyTorch reserved memory: {torch.cuda.memory_reserved()/1024**2:.2f} MB")

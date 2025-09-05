@@ -33,6 +33,10 @@ from solver.training_loss import scalar_training_loss
 from solver.solver_functions import LinearSolverFunctions
 from solver.conjugate_gradient import cgls_damped
 
+from copy import deepcopy
+
+from matplotlib import pyplot as plt
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -68,7 +72,7 @@ def temp_seed(seed):
         np.random.set_state(np_state)
         torch.random.set_rng_state(torch_state)
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, num_images):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, num_images, reset_adam):
     print("after training called")
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
@@ -82,6 +86,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+
+
+        if reset_adam:
+            for optimizer in [gaussians.optimizer, gaussians.exposure_optimizer]:
+                for param_group in optimizer.param_groups:
+                    for p in param_group['params']:
+                        if p in optimizer.state:
+                            optimizer.state[p].clear()
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -198,6 +210,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
 
+            gaussians_old = deepcopy(gaussians)
+
+            safe_interact(local=locals(), banner="Debug prompt before optimizer step")
+
+
             # Optimizer step
             if iteration < opt.iterations:
                 gaussians.exposure_optimizer.step()
@@ -209,6 +226,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 else:
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)
+
+            s = GaussianModelState.from_gaussians(gaussians) - GaussianModelState.from_gaussians(gaussians_old)
+
+            safe_interact(local=locals(), banner="Debug prompt after training step")
+            plot_loss_vs_step_size(l1_loss, scene, gaussians_old, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp, s)
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
@@ -281,6 +303,69 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
         torch.cuda.empty_cache()
 
+def plot_loss_vs_step_size(l1_loss, scene : Scene, gaussians_start, renderFunc, renderArgs, train_test_exp, s):
+    torch.cuda.empty_cache()
+    num_val_images = 30
+    val_stride = max(1, len(scene.getTrainCameras()) // num_val_images)
+    val_indices = list(range(0, len(scene.getTrainCameras()), val_stride))
+    validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
+                          {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx] for idx in val_indices]} )
+
+    test_l1_losses= []
+    test_psnrs = []
+    train_l1_losses= []
+    train_psnrs = []
+
+    with torch.no_grad():
+        for config in validation_configs:
+            if config['cameras'] and len(config['cameras']) > 0:
+                gaussians = deepcopy(gaussians_start)
+                step_size = 0.02
+                for i in range(200):
+                    alpha = i * step_size
+                    gaussians.update_step(step_size * s)
+                    
+                    l1_test = 0.0
+                    psnr_test = 0.0
+                    for idx, viewpoint in enumerate(config['cameras']):
+                        image = torch.clamp(renderFunc(viewpoint, gaussians, *renderArgs)["render"], 0.0, 1.0)
+                        gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                        if train_test_exp:
+                            image = image[..., image.shape[-1] // 2:]
+                            gt_image = gt_image[..., gt_image.shape[-1] // 2:]
+                        l1_test += l1_loss(image, gt_image).mean().double()
+                        psnr_test += psnr(image, gt_image).mean().double()
+                    psnr_test /= len(config['cameras'])
+                    l1_test /= len(config['cameras'])          
+
+                    print(f"alpha {alpha:.3f} l1 {l1_test:.6f} psnr {psnr_test:.2f}")
+                    if config['name'] == 'test':
+                        test_l1_losses.append(l1_test.item())
+                        test_psnrs.append(psnr_test.item())
+                    else:
+                        train_l1_losses.append(l1_test.item())
+                        train_psnrs.append(psnr_test.item())
+
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1)
+    plt.plot(np.arange(0, 200) * step_size, train_l1_losses, label='Train L1 Loss')
+    plt.plot(np.arange(0, 200) * step_size, test_l1_losses, label='Test L1 Loss')
+    plt.xlabel('Step size')
+    plt.ylabel('L1 Loss')
+    plt.title('L1 Loss vs Step Size (Normalized to ADAM step)')
+    plt.legend()
+    plt.grid(True)
+    plt.subplot(1, 2, 2)
+    plt.plot(np.arange(0, 200) * step_size, train_psnrs, label='Train PSNR')
+    plt.plot(np.arange(0, 200) * step_size, test_psnrs, label='Test PSNR')
+    plt.xlabel('Step size')
+    plt.ylabel('PSNR')
+    plt.title('PSNR vs Step Size (Normalized to ADAM step)')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join("loss_vs_step_size.png"))
+
 if __name__ == "__main__":
 
     # Set up command line argument parser
@@ -300,6 +385,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--num_images", type=int, default = 5)
+    parser.add_argument("--reset_adam", action="store_true", default=False)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
@@ -312,7 +398,7 @@ if __name__ == "__main__":
     if not args.disable_viewer:
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.num_images)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.num_images, args.reset_adam)
 
     # All done
     print("\nTraining complete.")

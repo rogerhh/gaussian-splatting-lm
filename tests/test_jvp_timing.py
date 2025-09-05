@@ -68,9 +68,9 @@ def training(dataset, opt, pipe, checkpoint, num_images):
         viewpoint_cam = viewpoint_stack[rand_idx]
         viewpoint_cams.append(viewpoint_cam)
 
-    loss_func = partial(batch_training_loss, iteration=iteration, opt=opt, pipe=pipe, bg=bg, train_test_exp=dataset.train_test_exp, depth_l1_weight=depth_l1_weight, disable_ssim=True)
+    loss_func = partial(batch_training_loss, iteration=iteration, opt=opt, pipe=pipe, bg=bg, train_test_exp=dataset.train_test_exp, depth_l1_weight=depth_l1_weight, disable_ssim=False)
 
-    cur_state = LinearSolverFunctions(loss_func, gaussians, viewpoint_cams, batch_size=20)
+    cur_state = LinearSolverFunctions(loss_func, gaussians, param_mask=None, damp=None, splat_mask=None)
 
     u = GaussianModelState.zero_like_gaussians(gaussians)
 
@@ -78,33 +78,33 @@ def training(dataset, opt, pipe, checkpoint, num_images):
 
     # Warm up
     for _ in range(NUM_ITERATIONS):
-        cur_state.evaluate_loss()
+        cur_state.evaluate_loss(viewpoint_cams, batch_size=num_images, with_batch_stats=False, with_grad=False)
 
     jvp_start = time.time()
     for i in range(NUM_ITERATIONS):
         print(f"Matvec iteration {i+1}/{NUM_ITERATIONS}")
-        Ju = cur_state.jvp(u)
+        Ju = cur_state.jvp(u, viewpoint_cams, batch_size=num_images)
     jvp_end = time.time()
 
-    loss = cur_state.evaluate_loss()
+    loss = cur_state.evaluate_loss(viewpoint_cams, batch_size=num_images, with_batch_stats=False, with_grad=True)
     v = loss.zero_like()
 
     vjp_start = time.time()
     for i in range(NUM_ITERATIONS):
         print(f"VecMat iteration {i+1}/{NUM_ITERATIONS}")
-        JTv = cur_state.vjp(v)
+        JTv = cur_state.vjp(v, viewpoint_cams, batch_size=num_images)
     vjp_end = time.time()
 
     Hv_start = time.time()
     for i in range(NUM_ITERATIONS):
         print(f"Hv iteration {i+1}/{NUM_ITERATIONS}")
-        cur_state.Hv(u)
+        cur_state.Hv(u, v, viewpoint_cams, batch_size=num_images)
     Hv_end = time.time()
 
     forward_start = time.time()
     for i in range(NUM_ITERATIONS):
         print(f"Forward iteration {i+1}/{NUM_ITERATIONS}")
-        cur_state.evaluate_loss()
+        cur_state.evaluate_loss(viewpoint_cams, batch_size=num_images, with_batch_stats=False, with_grad=False)
     forward_end = time.time()
 
     print(f"Matvec time: {(jvp_end - jvp_start) * 1000 / NUM_ITERATIONS:.6f} milliseconds per iteration")

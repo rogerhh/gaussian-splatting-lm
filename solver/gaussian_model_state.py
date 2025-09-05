@@ -135,6 +135,17 @@ class GaussianModelState:
                    param_mask=param_mask,
                    splat_mask=splat_mask)
 
+    @classmethod
+    def from_gaussians(cls, gaussians, param_mask=None, splat_mask=None):
+        return cls(gaussians._xyz.data.clone(),
+                   gaussians._features_dc.data.clone(),
+                   gaussians._features_rest.data.clone(),
+                   gaussians._scaling.data.clone(),
+                   gaussians._rotation.data.clone(),
+                   gaussians._opacity.data.clone(),
+                   gaussians._exposure.data.clone(),
+                   param_mask=param_mask,
+                   splat_mask=splat_mask)
 
     @classmethod
     def from_gaussians_grad(cls, gaussians, param_mask=None, splat_mask=None):
@@ -385,7 +396,7 @@ class GaussianModelState:
         else:
             raise TypeError(f"Can only divide by scalar values, not {type(other)}")
 
-    def dot(self, other, damp):
+    def dot(self, other, damp=1):
         if isinstance(damp, (int, float)):
             s = torch.sum(self.xyz_grad * other.xyz_grad) + \
                 torch.sum(self.features_dc_grad * other.features_dc_grad) + \

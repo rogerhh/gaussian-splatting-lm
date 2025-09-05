@@ -109,7 +109,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
 
-    param_mask = GaussianModelParamGroupMask(mask_xyz=True, 
+    param_mask = GaussianModelParamGroupMask(mask_xyz=False, 
                                              mask_features_dc=False, 
                                              mask_features_rest=False, 
                                              mask_scaling=False, 
@@ -131,7 +131,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     solver_functions = LinearSolverFunctions(loss_func, gaussians, batch_size=10, param_mask=param_mask, damp=damp, splat_mask=None)
     rademacher_gen = partial(GaussianModelState.rademacher_like_gaussians, gaussians)
     preconditioner = AdaHessianPreconditioner(rademacher_gen, beta2=0.999, eps=1e-8, hessian_power=1.0)
-    pcg_max_iter = 5
+    pcg_max_iter = 10
 
     for iteration in range(first_iter, opt.iterations + 1):
         if network_gui.conn == None:
@@ -234,74 +234,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 pipe.debug = True
 
             if iteration == jvp_start:
-                warmup_sample_size = 50
+                warmup_sample_size = 1
                 warmup_cam_provider = CamProvider(train_cameras, mode="random", max_stride=1, sample_size=warmup_sample_size)
                 scale = len(train_cameras) / warmup_sample_size
                 preconditioner.reset()
-                preconditioner.update(solver_functions.Hv, warmup_cam_provider, scale, num_iter=10)
-                D_corrected = preconditioner.D_corrected
-                print("preconditioner D_corrected.sqrt() norm ", solver_functions.dot(D_corrected.sqrt(), D_corrected.sqrt()))
-            else:
 
-                update_sample_size = 50
-                cam_provider = CamProvider(batch_viewpoint_cams, mode="random", sample_size=update_sample_size)
-                scale = len(train_cameras) / update_sample_size
-                preconditioner.reset()
-                preconditioner.update(solver_functions.Hv, cam_provider, scale, num_iter=5)
-                D_corrected = preconditioner.D_corrected
-                print("preconditioner D_corrected.sqrt() norm ", solver_functions.dot(D_corrected.sqrt(), D_corrected.sqrt()))
-
-            train_scale = len(train_cameras) / len(batch_viewpoint_cams)
-            Hx = partial(solver_functions.Hv, viewpoint_cams=batch_viewpoint_cams, scale=train_scale)
-            g, start_loss = solver_functions.gradient_and_loss_est(batch_viewpoint_cams, train_scale)
-            x0 = solver_functions.get_initial_solution()
-
-            s = cg_damped(Ax=Hx,
-                          dot=solver_functions.dot,
-                          saxpy=solver_functions.saxpy,
-                          b=-g,
-                          x0=x0,
-                          M=preconditioner,
-                          max_iter=pcg_max_iter,
-                          restart_iter=5)
-
-            # Line search
-            alpha = 16.0
-            cur_alpha = 0.0
-            best_alpha = 0.0
-            val_scale = len(val_cameras) / len(val_cameras)
-            best_loss = solver_functions.evaluate_loss(val_cameras, val_scale)[0]
-            print(f"[ITER {iteration}] Line search start: alpha {cur_alpha}, loss {best_loss:.6f}")
-            for ls_iter in range(9):
-                gaussians.update_step(s * (alpha - cur_alpha))
-                cur_alpha = alpha
-                loss_scalar = solver_functions.evaluate_loss(val_cameras, val_scale)[0]
-
-                print(f"[ITER {iteration}] Line search iter {ls_iter}: alpha {cur_alpha}, loss {loss_scalar:.6f}")
-
-                if loss_scalar < best_loss:
-                    best_loss = loss_scalar
-                    best_alpha = cur_alpha
-
-                alpha *= 0.5
-
-            gaussians.update_step(s * (best_alpha - cur_alpha))
-            best_loss = solver_functions.evaluate_loss(val_cameras, val_scale)[0]
-            print(f"[ITER {iteration}] alpha = {best_alpha}, loss = {best_loss}")
-
-            xyz_grad_norm = s.xyz_grad.norm().item()
-            features_dc_grad_norm = s.features_dc_grad.norm().item()
-            features_rest_grad_norm = s.features_rest_grad.norm().item()
-            scaling_grad_norm = s.scaling_grad.norm().item()
-            rotation_grad_norm = s.rotation_grad.norm().item()
-            opacity_grad_norm = s.opacity_grad.norm().item()
-            exposure_grad_norm = s.exposure_grad.norm().item()
-
-            print(f"[ITER {iteration}]")
-            print(f"    Gradient norms: xyz {xyz_grad_norm:.4e}, features_dc {features_dc_grad_norm:.4e}, features_rest {features_rest_grad_norm:.4e}, scaling {scaling_grad_norm:.4e}, rotation {rotation_grad_norm:.4e}, opacity {opacity_grad_norm:.4e}, exposure {exposure_grad_norm:.4e}")
-
-            safe_interact(local=locals(), banner="Debugging main optimization loop...")
-            
+                for _ in range(50):
+                    preconditioner.update(solver_functions.Hv, warmup_cam_provider, scale, 100)
+                    D_corrected = preconditioner.D_sq / (1 - preconditioner.beta2 ** preconditioner.iteration)
+                    print(solver_functions.dot(D_corrected.sqrt(), D_corrected.sqrt()))
+                    import code; code.interact(local=locals())
+                exit()
 
 
         iter_end.record()

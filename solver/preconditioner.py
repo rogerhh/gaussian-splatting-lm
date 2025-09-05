@@ -1,4 +1,5 @@
 import torch
+from utils.general_utils import safe_interact
 
 class Preconditioner:
     def __init__(self, matrix):
@@ -22,19 +23,29 @@ class AdaHessianPreconditioner:
         self.iteration = 0
         self.D_sq = 0
 
-    def update(self, Hz_func, max_iter):
+    def update(self, Hz_func, cam_provider, scale, num_iter):
         self.iteration += 1
         D_accum = 0
-        for _ in range(max_iter):
+        for _ in range(num_iter):
+            cam_provider.sample_new()
+            vcs = cam_provider.get_cur_batch()
             z = self.z_gen_func()
-            Di = z * Hz_func(z)
-            D_accum = Di * Di + D_accum
+            Di = z * Hz_func(z, viewpoint_cams=vcs, scale=scale)
+            # D_accum = Di * Di + D_accum
+            D_accum = Di + D_accum
             del Di, z
 
-        D_accum = D_accum / max_iter
+        D_accum = D_accum / num_iter
+        D_accum = (D_accum * D_accum).sqrt()
+        safe_interact(local=locals(), banner="Debugging AdaHessianPreconditioner...")
         # D_accum.block_average_and_expand()
-        self.D_sq = ((1 - self.beta2) / max_iter) * D_accum + self.beta2 * self.D_sq
+        self.D_sq = ((1 - self.beta2) / num_iter) * D_accum + self.beta2 * self.D_sq
+
+    @property
+    def D_corrected(self):
+        return self.D_sq / (1 - self.beta2 ** self.iteration)
 
     def __call__(self, v):
         D_corrected = self.D_sq / (1 - self.beta2 ** self.iteration)
-        return v / (D_corrected.sqrt() + self.eps)
+        # return v / (D_corrected.sqrt() + self.eps)
+        return v / (D_corrected)

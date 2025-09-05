@@ -77,6 +77,7 @@ def cg_damped(
         p = z
 
         print(f"[Iter {iter_total}] res: {res:.2e}")
+        # import code; code.interact(local=locals(), banner="Debugging CG...")
 
         for k in range(restart_iter):
             gamma = dot(r, z)                       # gamma = <r, z>
@@ -99,7 +100,7 @@ def cg_damped(
             # if verbose:
             x_norm = math.sqrt(dot(x, x))
             print(f"[Iter {iter_total+1}] res: {res:.2e}, |x|: {x_norm:.2e}")
-            # safe_interact(local=locals(), banner="Debugging CG")
+            # import code; code.interact(local=locals(), banner="Debugging CG...")
 
             iter_total += 1
             if iter_total >= max_iter:
