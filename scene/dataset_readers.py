@@ -287,8 +287,9 @@ def readCamerasFromTransforms(path, transformsfile, depths_folder, white_backgro
             
     return cam_infos
 
-def readNerfSyntheticInfo(path, white_background, depths, eval, extension=".png"):
+def readNerfSyntheticInfo(path, white_background, depths, eval, init_type="sfm", extension=".png"):
 
+    assert init_type == "sfm"
     depths_folder=os.path.join(path, depths) if depths != "" else ""
     print("Reading Training Transforms")
     train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", depths_folder, white_background, False, extension)
